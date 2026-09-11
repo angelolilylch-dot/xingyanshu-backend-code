@@ -122,7 +122,7 @@ func TestIPEntryWithMySQL(t *testing.T) {
 		t.Fatalf("list DCI-verified pending IP: data=%#v code=%s err=%v", pending, code, err)
 	}
 	confirmed, code, err := service.ReviewRights(context.Background(), compliance, ipID, 5, RightsReviewRequest{Result: "CONFIRM", Comment: "权属与授权边界确认", AuthPlanVersionID: versionID, DistributionTemplateID: templateID, DistributionItems: input.DistributionItems}, "127.0.0.1")
-	if err != nil || code != "" || confirmed["status"] != "RIGHTS_CONFIRMED" || confirmed["evidenceReceiptNo"] == "" {
+	if err != nil || code != "" || confirmed["status"] != "LISTED" || confirmed["mallVisible"] != true || confirmed["evidenceReceiptNo"] == "" {
 		t.Fatalf("confirm rights: data=%#v code=%s err=%v", confirmed, code, err)
 	}
 	var bindingCount, successEvidenceCount int64

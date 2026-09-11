@@ -157,17 +157,6 @@ func RegisterRoutes(group *gin.RouterGroup, service *Service, auth gin.HandlerFu
 			return service.ReviewRights(c.Request.Context(), current, id, version, input, c.ClientIP())
 		})
 	})
-	// 已确权 IP 的商城上架由平台管理员执行，是创作者商城查询的前置状态流转。
-	listing := protected.Group("", identity.RequireAnyPermission("AUTH_PLAN_MANAGE"))
-	listing.POST("/ips/:ipId/list", func(c *gin.Context) {
-		id, version, ok := ipIDVersion(c)
-		if !ok {
-			return
-		}
-		current, _ := identity.CurrentAdminFromContext(c)
-		data, code, err := service.ListForMall(c.Request.Context(), current, id, version, c.ClientIP())
-		respond(c, http.StatusOK, data, code, err)
-	})
 	// 评估报告不作为城市运营录入IP的必填项；城市运营和版权/合规均可在各自允许的状态补传。
 	evaluation := protected.Group("", identity.RequireAnyPermission(cityIPPermission, "IP_REVIEW_COMPLIANCE"))
 	evaluation.POST("/ips/:ipId/evaluation-reports", func(c *gin.Context) {

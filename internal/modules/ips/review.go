@@ -214,7 +214,7 @@ func (s *Service) VerifyDCI(ctx context.Context, current identity.CurrentAdmin, 
 	return map[string]any{"id": fmt.Sprint(ipID), "status": nextStatus, "dciCertificateStatus": dciStatus, "version": version + 1}, "", nil
 }
 
-// ReviewRights 退回必须留下理由；确认则先取得存证成功回执，再冻结方案和比例并进入已确权状态。
+// ReviewRights 退回必须留下理由；确认则先取得存证成功回执，再冻结方案和比例并自动进入商城上架状态。
 func (s *Service) ReviewRights(ctx context.Context, current identity.CurrentAdmin, ipID uint64, version uint32, input RightsReviewRequest, clientIP string) (map[string]any, string, error) {
 	asset, code := s.pendingComplianceAsset(ctx, current, ipID, version)
 	if code != "" {
@@ -227,6 +227,9 @@ func (s *Service) ReviewRights(ctx context.Context, current identity.CurrentAdmi
 		return s.returnForSupplement(ctx, current, ipID, version, input, clientIP)
 	}
 	if asset.DCICertificateStatus != "VERIFIED" || input.AuthPlanVersionID == 0 || input.DistributionTemplateID == 0 || len(input.DistributionItems) == 0 {
+		return nil, "VALIDATION_REQUIRED", nil
+	}
+	if strings.TrimSpace(asset.ShortIntro) == "" || strings.TrimSpace(asset.DetailContent) == "" || strings.TrimSpace(asset.PublicCopyrightNotice) == "" || strings.TrimSpace(asset.PurchaseNotice) == "" || asset.CoverFileID == 0 {
 		return nil, "VALIDATION_REQUIRED", nil
 	}
 	if code := s.validateSelection(ctx, input.AuthPlanVersionID, input.DistributionTemplateID, input.DistributionItems); code != "" {
@@ -252,83 +255,33 @@ func (s *Service) ReviewRights(ctx context.Context, current identity.CurrentAdmi
 		if err := s.saveConfirmedBinding(tx, ipID, current.UserID, input); err != nil {
 			return err
 		}
-		values := map[string]any{"status": "RIGHTS_CONFIRMED", "status_reason": input.Comment, "version": version + 1, "updated_by": current.UserID, "status_changed_at": now, "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(current.UserID)}
+		values := map[string]any{"status": "LISTED", "mall_visible": true, "status_reason": input.Comment, "version": version + 1, "updated_by": current.UserID, "status_changed_at": now, "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(current.UserID)}
 		if err := tx.Table("ip_asset").Where("id=? AND version=?", ipID, version).Updates(values).Error; err != nil {
 			return err
 		}
 		if err := s.writeReview(tx, ipID, "RIGHTS_CONFIRMATION", "CONFIRM", input.Comment, nil, current.UserID); err != nil {
 			return err
 		}
-		if err := audit.WriteStatusHistory(tx, "IP", ipID, asset.Status, "RIGHTS_CONFIRMED", input.Comment, ipOperator(current, clientIP)); err != nil {
+		if err := audit.WriteStatusHistory(tx, "IP", ipID, asset.Status, "LISTED", input.Comment, ipOperator(current, clientIP)); err != nil {
 			return err
 		}
-		return audit.WriteLog(tx, "IP_RIGHTS_CONFIRMED", "IP", ipID, nil, map[string]any{"evidenceId": fmt.Sprint(evidenceID)}, "SUCCESS", ipOperator(current, clientIP))
+		return audit.WriteLog(tx, "IP_RIGHTS_CONFIRMED_AND_LISTED", "IP", ipID, nil, map[string]any{"evidenceId": fmt.Sprint(evidenceID), "status": "LISTED", "mallVisible": true}, "SUCCESS", ipOperator(current, clientIP))
 	})
 	if err != nil {
 		return nil, "RESOURCE_CONFLICT", err
 	}
-	return map[string]any{"id": fmt.Sprint(ipID), "status": "RIGHTS_CONFIRMED", "version": version + 1, "evidenceId": fmt.Sprint(evidenceID), "evidenceReceiptNo": evidenceRow.ReceiptNo}, "", nil
-}
-
-// ListForMall 将已确权且资料、方案和存证都完整的 IP 开放给创作者商城。
-func (s *Service) ListForMall(ctx context.Context, current identity.CurrentAdmin, ipID uint64, version uint32, clientIP string) (map[string]any, string, error) {
-	if !current.HasPermission("AUTH_PLAN_MANAGE") {
-		return nil, "AUTH_FORBIDDEN", nil
-	}
-	var asset struct {
-		Status                                                           string
-		Version                                                          uint32
-		DCICertificateStatus                                             string `gorm:"column:dci_certificate_status"`
-		MallVisible                                                      bool   `gorm:"column:mall_visible"`
-		CoverFileID                                                      uint64 `gorm:"column:cover_file_id"`
-		ShortIntro, DetailContent, PublicCopyrightNotice, PurchaseNotice string
-	}
-	if err := s.db.WithContext(ctx).Table("ip_asset").Where("id=?", ipID).Take(&asset).Error; err != nil {
-		return nil, "RESOURCE_NOT_FOUND", nil
-	}
-	if asset.Version != version {
-		return nil, "VERSION_CONFLICT", nil
-	}
-	if asset.Status != "RIGHTS_CONFIRMED" || asset.DCICertificateStatus != "VERIFIED" || asset.CoverFileID == 0 || strings.TrimSpace(asset.ShortIntro) == "" || strings.TrimSpace(asset.DetailContent) == "" || strings.TrimSpace(asset.PublicCopyrightNotice) == "" || strings.TrimSpace(asset.PurchaseNotice) == "" {
-		return nil, "IP_LISTING_PREREQUISITE_MISSING", nil
-	}
-	var bindingCount, evidenceCount int64
-	if err := s.db.WithContext(ctx).Table("ip_auth_binding b").Joins("JOIN auth_plan_version v ON v.id=b.auth_plan_version_id AND v.status='ENABLED'").Where("b.ip_id=? AND b.status='ACTIVE'", ipID).Count(&bindingCount).Error; err != nil {
-		return nil, "INTERNAL_ERROR", err
-	}
-	if err := s.db.WithContext(ctx).Table("evidence_record").Where("object_type='IP' AND object_id=? AND status='SUCCESS'", ipID).Count(&evidenceCount).Error; err != nil {
-		return nil, "INTERNAL_ERROR", err
-	}
-	if bindingCount != 1 || evidenceCount == 0 {
-		return nil, "IP_LISTING_PREREQUISITE_MISSING", nil
-	}
-	now := time.Now()
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		result := tx.Table("ip_asset").Where("id=? AND version=?", ipID, version).Updates(map[string]any{"status": "LISTED", "mall_visible": true, "version": version + 1, "updated_by": current.UserID, "status_changed_at": now, "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(current.UserID)})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == 0 {
-			return gorm.ErrRecordNotFound
-		}
-		if err := audit.WriteStatusHistory(tx, "IP", ipID, "RIGHTS_CONFIRMED", "LISTED", "平台管理员上架创作者商城", ipOperator(current, clientIP)); err != nil {
-			return err
-		}
-		return audit.WriteLog(tx, "IP_LISTED", "IP", ipID, nil, map[string]any{"status": "LISTED", "mallVisible": true}, "SUCCESS", ipOperator(current, clientIP))
-	})
-	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return nil, "VERSION_CONFLICT", nil
-		}
-		return nil, "INTERNAL_ERROR", err
-	}
-	return map[string]any{"id": fmt.Sprint(ipID), "status": "LISTED", "mallVisible": true, "version": version + 1}, "", nil
+	return map[string]any{"id": fmt.Sprint(ipID), "status": "LISTED", "mallVisible": true, "version": version + 1, "evidenceId": fmt.Sprint(evidenceID), "evidenceReceiptNo": evidenceRow.ReceiptNo}, "", nil
 }
 
 type complianceAsset struct {
-	Status               string `gorm:"column:status"`
-	Version              uint32 `gorm:"column:version"`
-	DCICertificateStatus string `gorm:"column:dci_certificate_status"`
+	Status                string `gorm:"column:status"`
+	Version               uint32 `gorm:"column:version"`
+	DCICertificateStatus  string `gorm:"column:dci_certificate_status"`
+	ShortIntro            string `gorm:"column:short_intro"`
+	DetailContent         string `gorm:"column:detail_content"`
+	PublicCopyrightNotice string `gorm:"column:public_copyright_notice"`
+	PurchaseNotice        string `gorm:"column:purchase_notice"`
+	CoverFileID           uint64 `gorm:"column:cover_file_id"`
 }
 
 func (s *Service) pendingComplianceAsset(ctx context.Context, current identity.CurrentAdmin, ipID uint64, version uint32) (complianceAsset, string) {
