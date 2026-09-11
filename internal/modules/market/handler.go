@@ -29,7 +29,7 @@ func RegisterRoutes(g *gin.RouterGroup, db *gorm.DB, auth gin.HandlerFunc) {
 		}
 		q.Count(&total)
 		var items []map[string]any
-		q.Select("a.id,a.ip_no,a.ip_name,a.short_intro,a.ip_type,a.cover_file_id,a.authorization_mode,v.price_amount,v.term_type,v.term_value,v.content_type,a.updated_at AS listed_at").Order("a.updated_at DESC").Offset((p - 1) * s).Limit(s).Find(&items)
+		q.Select("a.id,a.ip_no,a.ip_name,a.short_intro,a.ip_type,a.cover_file_id,a.authorization_mode,a.suggested_transaction_price_amount AS price_amount,v.term_type,v.term_value,v.content_type,a.updated_at AS listed_at").Order("a.updated_at DESC").Offset((p - 1) * s).Limit(s).Find(&items)
 		httpx.Success(c, http.StatusOK, map[string]any{"items": items, "pageNo": p, "pageSize": s, "total": total})
 	})
 	r.GET("/:ipId", func(c *gin.Context) {
@@ -38,7 +38,7 @@ func RegisterRoutes(g *gin.RouterGroup, db *gorm.DB, auth gin.HandlerFunc) {
 			return
 		}
 		var row map[string]any
-		err := db.WithContext(c).Table("ip_asset a").Joins("JOIN ip_auth_binding b ON b.ip_id=a.id AND b.status='ACTIVE'").Joins("JOIN auth_plan_version v ON v.id=b.auth_plan_version_id AND v.status='ENABLED'").Where("a.id=? AND a.status='LISTED' AND a.mall_visible=1", id).Select("a.id,a.ip_no,a.ip_name,a.ip_type,a.short_intro,a.detail_content,a.culture_story,a.ip_feature,a.cover_file_id,a.public_copyright_notice,a.purchase_notice,a.authorization_mode,v.price_amount,v.term_type,v.term_value,v.region_mode,v.scenes_json,v.content_type").Take(&row).Error
+		err := db.WithContext(c).Table("ip_asset a").Joins("JOIN ip_auth_binding b ON b.ip_id=a.id AND b.status='ACTIVE'").Joins("JOIN auth_plan_version v ON v.id=b.auth_plan_version_id AND v.status='ENABLED'").Where("a.id=? AND a.status='LISTED' AND a.mall_visible=1", id).Select("a.id,a.ip_no,a.ip_name,a.ip_type,a.short_intro,a.detail_content,a.culture_story,a.ip_feature,a.cover_file_id,a.public_copyright_notice,a.purchase_notice,a.authorization_mode,a.suggested_transaction_price_amount AS price_amount,v.term_type,v.term_value,v.region_mode,v.scenes_json,v.content_type").Take(&row).Error
 		if err != nil {
 			httpx.AbortWithError(c, httpx.NewError(http.StatusNotFound, "IP_NOT_LISTED", "IP未上架或不可购买"))
 			return
@@ -59,7 +59,7 @@ func RegisterRoutes(g *gin.RouterGroup, db *gorm.DB, auth gin.HandlerFunc) {
 			QuotaTotal     int64  `gorm:"column:quota_total"`
 			Mode           string `gorm:"column:authorization_mode"`
 		}
-		err := db.WithContext(c).Table("creator_profile cp").Joins("JOIN ip_asset a ON a.id=? AND a.status='LISTED' AND a.mall_visible=1", id).Joins("JOIN ip_auth_binding b ON b.ip_id=a.id AND b.status='ACTIVE'").Joins("JOIN auth_plan_version v ON v.id=b.auth_plan_version_id AND v.status='ENABLED'").Where("cp.id=?", cur.CreatorID).Select("cp.identity_status,cp.status,a.ip_name,a.authorization_mode,v.price_amount,v.quota_total").Take(&row).Error
+		err := db.WithContext(c).Table("creator_profile cp").Joins("JOIN ip_asset a ON a.id=? AND a.status='LISTED' AND a.mall_visible=1", id).Joins("JOIN ip_auth_binding b ON b.ip_id=a.id AND b.status='ACTIVE'").Joins("JOIN auth_plan_version v ON v.id=b.auth_plan_version_id AND v.status='ENABLED'").Where("cp.id=?", cur.CreatorID).Select("cp.identity_status,cp.status,a.ip_name,a.authorization_mode,a.suggested_transaction_price_amount AS price_amount,v.quota_total").Take(&row).Error
 		can := err == nil && row.IdentityStatus == "VERIFIED" && row.Status == "ACTIVE"
 		code := ""
 		msg := "可购买"

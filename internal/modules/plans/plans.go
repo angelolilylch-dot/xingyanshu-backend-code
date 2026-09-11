@@ -47,7 +47,6 @@ type AuthCreate struct {
 	NCreationAllowed       bool     `json:"nCreationAllowed"`
 	ContentType            string   `json:"contentType" binding:"required,max=40"`
 	QuotaTotal             int      `json:"quotaTotal" binding:"min=1"`
-	PriceAmount            string   `json:"priceAmount" binding:"required,max=32"`
 	DistributionTemplateID uint64   `json:"distributionTemplateId" binding:"required"`
 }
 
@@ -64,7 +63,6 @@ type AuthDraftUpdate struct {
 	NCreationAllowed       bool     `json:"nCreationAllowed"`
 	ContentType            string   `json:"contentType" binding:"required,max=40"`
 	QuotaTotal             int      `json:"quotaTotal" binding:"min=1"`
-	PriceAmount            string   `json:"priceAmount" binding:"required,max=32"`
 	DistributionTemplateID uint64   `json:"distributionTemplateId" binding:"required"`
 }
 type Review struct {
@@ -234,7 +232,7 @@ func (s *Service) CreateAuth(ctx context.Context, c identity.CurrentAdmin, r Aut
 		if err := tx.Table("auth_plan").Create(map[string]any{"id": id, "status": "DRAFT", "version": 1, "created_by": c.UserID, "plan_no": r.PlanNo, "plan_name": r.PlanName, "current_version_id": vid, "is_bound": false}).Error; err != nil {
 			return err
 		}
-		return tx.Table("auth_plan_version").Create(map[string]any{"id": vid, "status": "DRAFT", "version": 1, "created_by": c.UserID, "plan_id": id, "distribution_template_id": r.DistributionTemplateID, "version_no": 1, "authorization_mode": r.AuthorizationMode, "term_type": r.TermType, "term_value": r.TermValue, "region_mode": r.RegionMode, "scenes_json": string(scenesJSON), "commercial_allowed": r.CommercialAllowed, "derivative_allowed": r.DerivativeAllowed, "n_creation_allowed": r.NCreationAllowed, "content_type": r.ContentType, "quota_total": r.QuotaTotal, "price_amount": r.PriceAmount}).Error
+		return tx.Table("auth_plan_version").Create(map[string]any{"id": vid, "status": "DRAFT", "version": 1, "created_by": c.UserID, "plan_id": id, "distribution_template_id": r.DistributionTemplateID, "version_no": 1, "authorization_mode": r.AuthorizationMode, "term_type": r.TermType, "term_value": r.TermValue, "region_mode": r.RegionMode, "scenes_json": string(scenesJSON), "commercial_allowed": r.CommercialAllowed, "derivative_allowed": r.DerivativeAllowed, "n_creation_allowed": r.NCreationAllowed, "content_type": r.ContentType, "quota_total": r.QuotaTotal}).Error
 	})
 	if err != nil {
 		return nil, "RESOURCE_CONFLICT", err
@@ -273,7 +271,7 @@ func (s *Service) UpdateAuthDraft(ctx context.Context, c identity.CurrentAdmin, 
 		if err := tx.Table("auth_plan").Where("id = ? AND version = ?", id, version).Updates(map[string]any{"plan_name": r.PlanName, "version": version + 1, "updated_by": c.UserID}).Error; err != nil {
 			return err
 		}
-		values := map[string]any{"authorization_mode": r.AuthorizationMode, "term_type": r.TermType, "term_value": r.TermValue, "region_mode": r.RegionMode, "scenes_json": string(scenesJSON), "commercial_allowed": r.CommercialAllowed, "derivative_allowed": r.DerivativeAllowed, "n_creation_allowed": r.NCreationAllowed, "content_type": r.ContentType, "quota_total": r.QuotaTotal, "price_amount": r.PriceAmount, "distribution_template_id": r.DistributionTemplateID, "updated_by": c.UserID}
+		values := map[string]any{"authorization_mode": r.AuthorizationMode, "term_type": r.TermType, "term_value": r.TermValue, "region_mode": r.RegionMode, "scenes_json": string(scenesJSON), "commercial_allowed": r.CommercialAllowed, "derivative_allowed": r.DerivativeAllowed, "n_creation_allowed": r.NCreationAllowed, "content_type": r.ContentType, "quota_total": r.QuotaTotal, "distribution_template_id": r.DistributionTemplateID, "updated_by": c.UserID}
 		if err := tx.Table("auth_plan_version").Where("id = ?", plan.CurrentVersionID).Updates(values).Error; err != nil {
 			return err
 		}
@@ -298,7 +296,7 @@ func (s *Service) validateAuthorizationTemplate(ctx context.Context, authorizati
 }
 
 func (s *Service) ListAuthPlans(ctx context.Context, enabledOnly bool) (map[string]any, error) {
-	q := s.db.WithContext(ctx).Table("auth_plan p").Select("p.*,v.authorization_mode,v.content_type,v.quota_total,v.price_amount,v.distribution_template_id").Joins("left join auth_plan_version v on v.id=p.current_version_id")
+	q := s.db.WithContext(ctx).Table("auth_plan p").Select("p.*,v.authorization_mode,v.content_type,v.quota_total,v.distribution_template_id").Joins("left join auth_plan_version v on v.id=p.current_version_id")
 	if enabledOnly {
 		q = q.Where("p.status=?", "ENABLED")
 	}

@@ -57,7 +57,7 @@ func TestPlansWithMySQL(t *testing.T) {
 	createdPlan, code, err := service.CreateAuth(context.Background(), operator, AuthCreate{
 		PlanNo: planNo, PlanName: "测试普通授权方案", AuthorizationMode: "NORMAL_SHARE", TermType: "MONTH", TermValue: intPtr(12),
 		RegionMode: "NATIONWIDE", Scenes: []string{"PRODUCT"}, CommercialAllowed: true, DerivativeAllowed: true,
-		ContentType: "PRODUCT", QuotaTotal: 10, PriceAmount: "100.00", DistributionTemplateID: templateID,
+		ContentType: "PRODUCT", QuotaTotal: 10, DistributionTemplateID: templateID,
 	}, "127.0.0.1")
 	if err != nil || code != "" {
 		t.Fatalf("create auth plan: data=%#v code=%s err=%v", createdPlan, code, err)

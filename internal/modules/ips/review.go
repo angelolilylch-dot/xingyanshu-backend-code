@@ -229,6 +229,9 @@ func (s *Service) ReviewRights(ctx context.Context, current identity.CurrentAdmi
 	if asset.DCICertificateStatus != "VERIFIED" || input.AuthPlanVersionID == 0 || input.DistributionTemplateID == 0 || len(input.DistributionItems) == 0 {
 		return nil, "VALIDATION_REQUIRED", nil
 	}
+	if !validMoney(input.SuggestedTransactionPriceAmount) {
+		return nil, "VALIDATION_FORMAT_INVALID", nil
+	}
 	if strings.TrimSpace(asset.ShortIntro) == "" || strings.TrimSpace(asset.DetailContent) == "" || strings.TrimSpace(asset.PublicCopyrightNotice) == "" || strings.TrimSpace(asset.PurchaseNotice) == "" || asset.CoverFileID == 0 {
 		return nil, "VALIDATION_REQUIRED", nil
 	}
@@ -255,7 +258,7 @@ func (s *Service) ReviewRights(ctx context.Context, current identity.CurrentAdmi
 		if err := s.saveConfirmedBinding(tx, ipID, current.UserID, input); err != nil {
 			return err
 		}
-		values := map[string]any{"status": "LISTED", "mall_visible": true, "status_reason": input.Comment, "version": version + 1, "updated_by": current.UserID, "status_changed_at": now, "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(current.UserID)}
+		values := map[string]any{"status": "LISTED", "mall_visible": true, "suggested_transaction_price_amount": input.SuggestedTransactionPriceAmount, "status_reason": input.Comment, "version": version + 1, "updated_by": current.UserID, "status_changed_at": now, "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(current.UserID)}
 		if err := tx.Table("ip_asset").Where("id=? AND version=?", ipID, version).Updates(values).Error; err != nil {
 			return err
 		}
@@ -270,7 +273,7 @@ func (s *Service) ReviewRights(ctx context.Context, current identity.CurrentAdmi
 	if err != nil {
 		return nil, "RESOURCE_CONFLICT", err
 	}
-	return map[string]any{"id": fmt.Sprint(ipID), "status": "LISTED", "mallVisible": true, "version": version + 1, "evidenceId": fmt.Sprint(evidenceID), "evidenceReceiptNo": evidenceRow.ReceiptNo}, "", nil
+	return map[string]any{"id": fmt.Sprint(ipID), "status": "LISTED", "mallVisible": true, "suggestedTransactionPriceAmount": input.SuggestedTransactionPriceAmount, "version": version + 1, "evidenceId": fmt.Sprint(evidenceID), "evidenceReceiptNo": evidenceRow.ReceiptNo}, "", nil
 }
 
 // Pause 将已上架 IP 暂停销售，但不影响已经生效的历史授权。

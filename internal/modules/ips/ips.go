@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"regexp"
 	"strings"
 	"time"
 
@@ -56,32 +57,33 @@ type DistributionItem struct {
 	Ratio           string `json:"ratio" binding:"required,max=16"`
 }
 type IPInput struct {
-	IPName                    string             `json:"ipName" binding:"required,max=200"`
-	IPType                    string             `json:"ipType" binding:"required,max=40"`
-	SourceType                string             `json:"sourceType" binding:"required,max=40"`
-	MainCityOrgID             uint64             `json:"mainCityOrgId,string" binding:"required"`
-	ShortIntro                string             `json:"shortIntro" binding:"required,max=500"`
-	DetailContent             string             `json:"detailContent" binding:"required,max=10000"`
-	CultureStory              string             `json:"cultureStory" binding:"required,max=10000"`
-	IPFeature                 string             `json:"ipFeature" binding:"required,max=5000"`
-	CreativeDirections        []string           `json:"creativeDirections" binding:"required,min=1"`
-	ApplicableProductTypes    []string           `json:"applicableProductTypes" binding:"required,min=1"`
-	ApplicableActivityTypes   []string           `json:"applicableActivityTypes" binding:"required,min=1"`
-	RegionTagCodes            []string           `json:"regionTagCodes"`
-	CultureTagCodes           []string           `json:"cultureTagCodes"`
-	CategoryTagCodes          []string           `json:"categoryTagCodes"`
-	CommercializationTagCodes []string           `json:"commercializationTagCodes"`
-	PublicCopyrightNotice     string             `json:"publicCopyrightNotice" binding:"required,max=5000"`
-	PurchaseNotice            string             `json:"purchaseNotice" binding:"required,max=5000"`
-	CoverFileID               uint64             `json:"coverFileId,string" binding:"required"`
-	DetailFileIDs             []uint64           `json:"detailFileIds"`
-	RightHolder               RightHolder        `json:"rightHolder" binding:"required"`
-	RightDocuments            []RightDocument    `json:"rightDocuments" binding:"required,min=1"`
-	DCICertificateNo          string             `json:"dciCertificateNo" binding:"omitempty,max=128"`
-	DCICertificateFileID      uint64             `json:"dciCertificateFileId,string"`
-	AuthPlanVersionID         uint64             `json:"authPlanVersionId,string" binding:"required"`
-	DistributionTemplateID    uint64             `json:"distributionTemplateId,string" binding:"required"`
-	DistributionItems         []DistributionItem `json:"distributionItems" binding:"required,min=1"`
+	IPName                          string             `json:"ipName" binding:"required,max=200"`
+	IPType                          string             `json:"ipType" binding:"required,max=40"`
+	SourceType                      string             `json:"sourceType" binding:"required,max=40"`
+	MainCityOrgID                   uint64             `json:"mainCityOrgId,string" binding:"required"`
+	ShortIntro                      string             `json:"shortIntro" binding:"required,max=500"`
+	DetailContent                   string             `json:"detailContent" binding:"required,max=10000"`
+	CultureStory                    string             `json:"cultureStory" binding:"required,max=10000"`
+	IPFeature                       string             `json:"ipFeature" binding:"required,max=5000"`
+	CreativeDirections              []string           `json:"creativeDirections" binding:"required,min=1"`
+	ApplicableProductTypes          []string           `json:"applicableProductTypes" binding:"required,min=1"`
+	ApplicableActivityTypes         []string           `json:"applicableActivityTypes" binding:"required,min=1"`
+	RegionTagCodes                  []string           `json:"regionTagCodes"`
+	CultureTagCodes                 []string           `json:"cultureTagCodes"`
+	CategoryTagCodes                []string           `json:"categoryTagCodes"`
+	CommercializationTagCodes       []string           `json:"commercializationTagCodes"`
+	PublicCopyrightNotice           string             `json:"publicCopyrightNotice" binding:"required,max=5000"`
+	PurchaseNotice                  string             `json:"purchaseNotice" binding:"required,max=5000"`
+	SuggestedTransactionPriceAmount string             `json:"suggestedTransactionPriceAmount" binding:"required,max=32"`
+	CoverFileID                     uint64             `json:"coverFileId,string" binding:"required"`
+	DetailFileIDs                   []uint64           `json:"detailFileIds"`
+	RightHolder                     RightHolder        `json:"rightHolder" binding:"required"`
+	RightDocuments                  []RightDocument    `json:"rightDocuments" binding:"required,min=1"`
+	DCICertificateNo                string             `json:"dciCertificateNo" binding:"omitempty,max=128"`
+	DCICertificateFileID            uint64             `json:"dciCertificateFileId,string"`
+	AuthPlanVersionID               uint64             `json:"authPlanVersionId,string" binding:"required"`
+	DistributionTemplateID          uint64             `json:"distributionTemplateId,string" binding:"required"`
+	DistributionItems               []DistributionItem `json:"distributionItems" binding:"required,min=1"`
 }
 type SubmitRequest struct {
 	Comment string `json:"comment" binding:"required,max=500"`
@@ -96,11 +98,12 @@ type DCIRequest struct {
 	RequestNote          string `json:"requestNote" binding:"omitempty,max=500"`
 }
 type EvaluationRequest struct {
-	ReportNo        string `json:"reportNo" binding:"required,max=128"`
-	InstitutionName string `json:"institutionName" binding:"required,max=256"`
-	ReportDate      string `json:"reportDate" binding:"required,datetime=2006-01-02"`
-	ValidTo         string `json:"validTo" binding:"omitempty,datetime=2006-01-02"`
-	FileID          uint64 `json:"fileId,string" binding:"required"`
+	ReportNo                       string `json:"reportNo" binding:"required,max=128"`
+	InstitutionName                string `json:"institutionName" binding:"required,max=256"`
+	ReportDate                     string `json:"reportDate" binding:"required,datetime=2006-01-02"`
+	ValidTo                        string `json:"validTo" binding:"omitempty,datetime=2006-01-02"`
+	FileID                         uint64 `json:"fileId,string" binding:"required"`
+	EvaluationSuggestedPriceAmount string `json:"evaluationSuggestedPriceAmount" binding:"omitempty,max=32"`
 }
 type DCIHandleRequest struct {
 	HandlingStatus string `json:"handlingStatus" binding:"required,oneof=CONTACTED PROCESSING COMPLETED CLOSED"`
@@ -111,12 +114,13 @@ type DCIVerificationRequest struct {
 	Comment string `json:"comment" binding:"required,max=500"`
 }
 type RightsReviewRequest struct {
-	Result                 string             `json:"result" binding:"required,oneof=CONFIRM RETURN"`
-	Comment                string             `json:"comment" binding:"required,max=500"`
-	SupplementItems        []string           `json:"supplementItems"`
-	AuthPlanVersionID      uint64             `json:"authPlanVersionId,string"`
-	DistributionTemplateID uint64             `json:"distributionTemplateId,string"`
-	DistributionItems      []DistributionItem `json:"distributionItems"`
+	Result                          string             `json:"result" binding:"required,oneof=CONFIRM RETURN"`
+	Comment                         string             `json:"comment" binding:"required,max=500"`
+	SupplementItems                 []string           `json:"supplementItems"`
+	AuthPlanVersionID               uint64             `json:"authPlanVersionId,string"`
+	DistributionTemplateID          uint64             `json:"distributionTemplateId,string"`
+	DistributionItems               []DistributionItem `json:"distributionItems"`
+	SuggestedTransactionPriceAmount string             `json:"suggestedTransactionPriceAmount"`
 }
 
 func ipOperator(c identity.CurrentAdmin, clientIP string) audit.Operator {
@@ -324,9 +328,12 @@ func (s *Service) CreateEvaluation(ctx context.Context, current identity.Current
 	if code, err := s.moderate(ctx, ipID, current.UserID, input.ReportNo+"\n"+input.InstitutionName); code != "" {
 		return nil, code, err
 	}
+	if input.EvaluationSuggestedPriceAmount != "" && !validMoney(input.EvaluationSuggestedPriceAmount) {
+		return nil, "VALIDATION_FORMAT_INVALID", nil
+	}
 	id := idgen.Next()
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Table("ip_evaluation_report").Create(map[string]any{"id": id, "status": "ACTIVE", "version": 1, "created_by": current.UserID, "ip_id": ipID, "report_no": input.ReportNo, "institution_name": input.InstitutionName, "report_date": input.ReportDate, "valid_to": nullable(input.ValidTo), "file_id": input.FileID}).Error; err != nil {
+		if err := tx.Table("ip_evaluation_report").Create(map[string]any{"id": id, "status": "ACTIVE", "version": 1, "created_by": current.UserID, "ip_id": ipID, "report_no": input.ReportNo, "institution_name": input.InstitutionName, "report_date": input.ReportDate, "valid_to": nullable(input.ValidTo), "file_id": input.FileID, "evaluation_suggested_price_amount": nullable(input.EvaluationSuggestedPriceAmount)}).Error; err != nil {
 			return err
 		}
 		return s.linkFile(tx, input.FileID, "IP", ipID, "IP_EVALUATION_REPORT", 0, current.UserID)
@@ -381,6 +388,9 @@ func (s *Service) List(ctx context.Context, current identity.CurrentAdmin, keywo
 }
 
 func (s *Service) validateInput(ctx context.Context, input IPInput) string {
+	if !validMoney(input.SuggestedTransactionPriceAmount) {
+		return "VALIDATION_FORMAT_INVALID"
+	}
 	if !s.fileActive(ctx, input.CoverFileID) {
 		return "RESOURCE_NOT_FOUND"
 	}
@@ -398,6 +408,12 @@ func (s *Service) validateInput(ctx context.Context, input IPInput) string {
 		return "RESOURCE_NOT_FOUND"
 	}
 	return s.validateSelection(ctx, input.AuthPlanVersionID, input.DistributionTemplateID, input.DistributionItems)
+}
+
+var moneyPattern = regexp.MustCompile(`^(0|[1-9][0-9]{0,15})(\.[0-9]{1,2})?$`)
+
+func validMoney(value string) bool {
+	return moneyPattern.MatchString(strings.TrimSpace(value))
 }
 func (s *Service) validateSelection(ctx context.Context, authPlanVersionID, distributionTemplateID uint64, distributionItems []DistributionItem) string {
 	var plan struct{ AuthorizationMode string }
@@ -538,7 +554,9 @@ func (input IPInput) assetValues(id, userID uint64, now time.Time) (map[string]a
 	if input.DCICertificateFileID != 0 {
 		dciStatus = "UPLOADED"
 	}
-	return map[string]any{"id": id, "status": "DRAFT", "version": 1, "created_by": userID, "created_at": now, "ip_no": fmt.Sprintf("IP-%d", id), "ip_name": input.IPName, "ip_type": input.IPType, "source_type": input.SourceType, "main_city_org_id": input.MainCityOrgID, "cover_file_id": input.CoverFileID, "short_intro": input.ShortIntro, "detail_content": input.DetailContent, "culture_story": input.CultureStory, "ip_feature": input.IPFeature, "creative_directions_json": creative, "applicable_product_types_json": product, "applicable_activity_types_json": activity, "region_tag_codes_json": region, "culture_tag_codes_json": culture, "category_tag_codes_json": category, "commercialization_tag_codes_json": commercial, "public_copyright_notice": input.PublicCopyrightNotice, "purchase_notice": input.PurchaseNotice, "dci_certificate_status": dciStatus, "dci_certificate_no": nullable(input.DCICertificateNo), "dci_certificate_file_id": nullableID(input.DCICertificateFileID), "authorization_mode": "PENDING_SELECTION", "mall_visible": false}, nil
+	values := map[string]any{"id": id, "status": "DRAFT", "version": 1, "created_by": userID, "created_at": now, "ip_no": fmt.Sprintf("IP-%d", id), "ip_name": input.IPName, "ip_type": input.IPType, "source_type": input.SourceType, "main_city_org_id": input.MainCityOrgID, "cover_file_id": input.CoverFileID, "short_intro": input.ShortIntro, "detail_content": input.DetailContent, "culture_story": input.CultureStory, "ip_feature": input.IPFeature, "creative_directions_json": creative, "applicable_product_types_json": product, "applicable_activity_types_json": activity, "region_tag_codes_json": region, "culture_tag_codes_json": culture, "category_tag_codes_json": category, "commercialization_tag_codes_json": commercial, "public_copyright_notice": input.PublicCopyrightNotice, "purchase_notice": input.PurchaseNotice, "dci_certificate_status": dciStatus, "dci_certificate_no": nullable(input.DCICertificateNo), "dci_certificate_file_id": nullableID(input.DCICertificateFileID), "authorization_mode": "PENDING_SELECTION", "mall_visible": false}
+	values["suggested_transaction_price_amount"] = input.SuggestedTransactionPriceAmount
+	return values, nil
 }
 func (input IPInput) textForModeration() string {
 	return strings.Join(append([]string{input.IPName, input.ShortIntro, input.DetailContent, input.CultureStory, input.IPFeature, input.PublicCopyrightNotice, input.PurchaseNotice, input.RightHolder.HolderName, input.RightHolder.RightsDescription}, input.CreativeDirections...), "\n")

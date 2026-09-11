@@ -66,7 +66,7 @@ func TestIPEntryWithMySQL(t *testing.T) {
 	mustIPExec(t, db.Table("auth_plan").Create(map[string]any{"id": planID, "status": "ENABLED", "version": 1, "created_by": 10401, "plan_no": fmt.Sprintf("AP_IP_%d", suffix), "plan_name": "IP录入测试授权方案", "current_version_id": versionID, "is_bound": false}).Error)
 	defer db.Exec("DELETE FROM auth_plan_version WHERE plan_id = ?", planID)
 	defer db.Exec("DELETE FROM auth_plan WHERE id = ?", planID)
-	mustIPExec(t, db.Table("auth_plan_version").Create(map[string]any{"id": versionID, "status": "ENABLED", "version": 1, "created_by": 10401, "plan_id": planID, "distribution_template_id": templateID, "version_no": 1, "authorization_mode": "NORMAL_SHARE", "term_type": "MONTH", "term_value": 12, "region_mode": "NATIONWIDE", "scenes_json": "[\"PRODUCT\"]", "commercial_allowed": true, "derivative_allowed": true, "n_creation_allowed": false, "content_type": "PRODUCT", "quota_total": 10, "price_amount": "100.00"}).Error)
+	mustIPExec(t, db.Table("auth_plan_version").Create(map[string]any{"id": versionID, "status": "ENABLED", "version": 1, "created_by": 10401, "plan_id": planID, "distribution_template_id": templateID, "version_no": 1, "authorization_mode": "NORMAL_SHARE", "term_type": "MONTH", "term_value": 12, "region_mode": "NATIONWIDE", "scenes_json": "[\"PRODUCT\"]", "commercial_allowed": true, "derivative_allowed": true, "n_creation_allowed": false, "content_type": "PRODUCT", "quota_total": 10}).Error)
 
 	service := NewService(db, &passModerator{}, cfg.Auth.JWTSecret, evidence.NewService(db, evidence.MockProvider{}, "test-callback-secret"))
 	operator := identity.CurrentAdmin{UserID: 10401, OrgID: cityID, RoleCodes: []string{"CITY_OPERATOR"}, PermissionCodes: map[string]struct{}{cityIPPermission: {}}}
@@ -81,6 +81,15 @@ func TestIPEntryWithMySQL(t *testing.T) {
 	mustIPExec(t, db.Table("ip_distribution_item").Where("ip_id=?", ipID).Count(&distributionCount).Error)
 	if distributionCount != 3 {
 		t.Fatalf("expected 3 distribution items, got %d", distributionCount)
+	}
+	report, code, err := service.CreateEvaluation(context.Background(), operator, ipID, EvaluationRequest{ReportNo: fmt.Sprintf("EVAL-%d", suffix), InstitutionName: "测试评估机构", ReportDate: "2026-09-11", FileID: fileIDs[1], EvaluationSuggestedPriceAmount: "299.00"}, "127.0.0.1")
+	if err != nil || code != "" || report["reportNo"] == nil {
+		t.Fatalf("create evaluation report: data=%#v code=%s err=%v", report, code, err)
+	}
+	var evaluationPrice string
+	mustIPExec(t, db.Table("ip_evaluation_report").Select("evaluation_suggested_price_amount").Where("ip_id=?", ipID).Take(&evaluationPrice).Error)
+	if evaluationPrice != "299.00" {
+		t.Fatalf("expected optional evaluation suggested price 299.00, got %s", evaluationPrice)
 	}
 	assistance, code, err := service.CreateDCIAssistance(context.Background(), operator, ipID, 1, DCIRequest{ContactName: "测试联系人", ContactMobile: "13800138000", RequestNote: "请协助办理"}, "127.0.0.1")
 	if err != nil || code != "" {
@@ -122,7 +131,7 @@ func TestIPEntryWithMySQL(t *testing.T) {
 	if err != nil || code != "" || len(pending["items"].([]map[string]any)) != 1 || pending["items"].([]map[string]any)[0]["nextAction"] != "CONFIRM_RIGHTS" {
 		t.Fatalf("list DCI-verified pending IP: data=%#v code=%s err=%v", pending, code, err)
 	}
-	confirmed, code, err := service.ReviewRights(context.Background(), compliance, ipID, 5, RightsReviewRequest{Result: "CONFIRM", Comment: "权属与授权边界确认", AuthPlanVersionID: versionID, DistributionTemplateID: templateID, DistributionItems: input.DistributionItems}, "127.0.0.1")
+	confirmed, code, err := service.ReviewRights(context.Background(), compliance, ipID, 5, RightsReviewRequest{Result: "CONFIRM", Comment: "权属与授权边界确认", AuthPlanVersionID: versionID, DistributionTemplateID: templateID, DistributionItems: input.DistributionItems, SuggestedTransactionPriceAmount: "199.00"}, "127.0.0.1")
 	if err != nil || code != "" || confirmed["status"] != "LISTED" || confirmed["mallVisible"] != true || confirmed["evidenceReceiptNo"] == "" {
 		t.Fatalf("confirm rights: data=%#v code=%s err=%v", confirmed, code, err)
 	}
@@ -142,6 +151,11 @@ func TestIPEntryWithMySQL(t *testing.T) {
 	mustIPExec(t, db.Table("ip_asset").Where("id=?", ipID).Take(&asset).Error)
 	if asset.Status != "LISTED" || !asset.MallVisible || asset.Version != 6 {
 		t.Fatalf("expected IP auto-listed in same confirmation, status=%s mallVisible=%v version=%d", asset.Status, asset.MallVisible, asset.Version)
+	}
+	var transactionPrice string
+	mustIPExec(t, db.Table("ip_asset").Select("suggested_transaction_price_amount").Where("id=?", ipID).Scan(&transactionPrice).Error)
+	if transactionPrice != "199.00" {
+		t.Fatalf("expected confirmed transaction price 199.00, got %s", transactionPrice)
 	}
 	var history struct{ FromStatus, ToStatus string }
 	mustIPExec(t, db.Table("biz_status_history").Where("object_type='IP' AND object_id=?", ipID).Order("id DESC").Take(&history).Error)
@@ -206,7 +220,7 @@ func TestIPRoutesDoNotExposeManualListing(t *testing.T) {
 }
 
 func testIPInput(cityID, planVersionID, templateID uint64, fileIDs []uint64) IPInput {
-	return IPInput{IPName: "测试文化IP", IPType: "CULTURAL", SourceType: "CITY_COLLECTION", MainCityOrgID: cityID, ShortIntro: "测试简介", DetailContent: "测试完整介绍", CultureStory: "测试文化故事", IPFeature: "测试特色", CreativeDirections: []string{"文创商品"}, ApplicableProductTypes: []string{"CULTURAL_PRODUCT"}, ApplicableActivityTypes: []string{"EXHIBITION"}, PublicCopyrightNotice: "版权说明", PurchaseNotice: "购买须知", CoverFileID: fileIDs[0], DetailFileIDs: []uint64{fileIDs[1]}, RightHolder: RightHolder{HolderType: "INSTITUTION", HolderName: "测试权利机构", AcquisitionMethod: "ORIGINAL_CREATION", RightsDescription: "测试权属说明"}, RightDocuments: []RightDocument{{DocumentType: "COPYRIGHT_CERTIFICATE", DocumentNo: "RIGHT-TEST-001", FileID: fileIDs[2]}}, AuthPlanVersionID: planVersionID, DistributionTemplateID: templateID, DistributionItems: []DistributionItem{{ParticipantType: "RIGHT_HOLDER", Ratio: "0.6"}, {ParticipantType: "CITY_OPERATOR", Ratio: "0.2"}, {ParticipantType: "PLATFORM", Ratio: "0.2"}}}
+	return IPInput{IPName: "测试文化IP", IPType: "CULTURAL", SourceType: "CITY_COLLECTION", MainCityOrgID: cityID, ShortIntro: "测试简介", DetailContent: "测试完整介绍", CultureStory: "测试文化故事", IPFeature: "测试特色", CreativeDirections: []string{"文创商品"}, ApplicableProductTypes: []string{"CULTURAL_PRODUCT"}, ApplicableActivityTypes: []string{"EXHIBITION"}, PublicCopyrightNotice: "版权说明", PurchaseNotice: "购买须知", SuggestedTransactionPriceAmount: "199.00", CoverFileID: fileIDs[0], DetailFileIDs: []uint64{fileIDs[1]}, RightHolder: RightHolder{HolderType: "INSTITUTION", HolderName: "测试权利机构", AcquisitionMethod: "ORIGINAL_CREATION", RightsDescription: "测试权属说明"}, RightDocuments: []RightDocument{{DocumentType: "COPYRIGHT_CERTIFICATE", DocumentNo: "RIGHT-TEST-001", FileID: fileIDs[2]}}, AuthPlanVersionID: planVersionID, DistributionTemplateID: templateID, DistributionItems: []DistributionItem{{ParticipantType: "RIGHT_HOLDER", Ratio: "0.6"}, {ParticipantType: "CITY_OPERATOR", Ratio: "0.2"}, {ParticipantType: "PLATFORM", Ratio: "0.2"}}}
 }
 func cleanupIP(t *testing.T, db *gorm.DB, ipID uint64) {
 	for _, table := range []string{"ip_auth_binding", "ip_distribution_item", "ip_draft_auth_selection", "ip_right_document", "ip_right_holder", "ip_dci_assistance_request", "ip_evaluation_report", "ip_review_record"} {
