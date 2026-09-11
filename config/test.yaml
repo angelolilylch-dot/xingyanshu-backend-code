@@ -1,0 +1,61 @@
+app:
+  name: xingyanshu-backend
+  environment: test
+  server:
+    address: ":8080"
+  worker:
+    poll_interval: 5s
+
+database:
+  driver: mysql
+  host: 127.0.0.1
+  port: 3306
+  name: xingyanshu_test
+  username: root
+  password: root
+
+redis:
+  address: 127.0.0.1:6379
+  password: ""
+  database: 0
+
+auth:
+  jwt_secret: xingyanshu_test_only_change_before_production
+  access_token_ttl: 2h
+  refresh_token_ttl: 168h
+
+cors:
+  allowed_origins:
+    - "*"
+
+evidence:
+  provider: mock
+  callback_secret: xingyanshu_test_evidence_callback_secret
+
+file:
+  storage:
+    provider: cos
+    key_prefix: xingyanshu/test
+    cos:
+      bucket_url: https://testxingyanshu1-1331209793.cos.ap-guangzhou.myqcloud.com
+      secret_id: ${XINGYANSHU_REDACTED_SECRET_ID}
+      secret_key: ${XINGYANSHU_REDACTED_SECRET_KEY}
+  signed_url_ttl: 10m
+  watch_interval: 2s
+  policy:
+    images:
+      extensions: [jpg, jpeg, png, webp]
+      max_size_mb: 10
+    documents:
+      extensions: [pdf, doc, docx, xls, xlsx]
+      max_size_mb: 30
+    media:
+      extensions: [mp4, mp3, wav]
+      max_size_mb: 200
+
+bootstrap:
+  platform_org_name: 星衍树平台运营主体
+  initial_admin:
+    username: platform_admin
+    password: Admin@123456
+    display_name: 平台管理员

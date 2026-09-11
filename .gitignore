@@ -1,0 +1,7 @@
+config/local.yaml
+config/*.local.yaml
+
+# Local IDE, build output and dependencies
+.idea/
+bin/
+node_modules/
