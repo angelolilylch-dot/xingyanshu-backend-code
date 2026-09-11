@@ -157,6 +157,10 @@ func TestIPEntryWithMySQL(t *testing.T) {
 	if err != nil || code != "" || paused["status"] != "PAUSED" || paused["mallVisible"] != false {
 		t.Fatalf("pause listed IP: data=%#v code=%s err=%v", paused, code, err)
 	}
+	resumed, code, err := service.Resume(context.Background(), identity.CurrentAdmin{UserID: 10403, RoleCodes: []string{"PLATFORM_ADMIN"}, PermissionCodes: map[string]struct{}{"AUTH_PLAN_MANAGE": {}}}, ipID, 7, IPStatusChangeRequest{Comment: "风险排查完成"}, "127.0.0.1")
+	if err != nil || code != "" || resumed["status"] != "LISTED" || resumed["mallVisible"] != true {
+		t.Fatalf("resume paused IP: data=%#v code=%s err=%v", resumed, code, err)
+	}
 }
 
 func TestIPRoutesDoNotExposeManualListing(t *testing.T) {
@@ -176,6 +180,15 @@ func TestIPRoutesDoNotExposeManualListing(t *testing.T) {
 	}
 	if !foundPause {
 		t.Fatalf("IP pause route must be exposed")
+	}
+	foundResume := false
+	for _, route := range router.Routes() {
+		if route.Method == "POST" && route.Path == "/api/v1/ips/:ipId/resume" {
+			foundResume = true
+		}
+	}
+	if !foundResume {
+		t.Fatalf("IP resume route must be exposed")
 	}
 }
 

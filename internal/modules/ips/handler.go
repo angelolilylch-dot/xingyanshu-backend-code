@@ -173,6 +173,21 @@ func RegisterRoutes(group *gin.RouterGroup, service *Service, auth gin.HandlerFu
 			return service.Pause(c.Request.Context(), current, id, version, input, c.ClientIP())
 		})
 	})
+	listing.POST("/ips/:ipId/resume", func(c *gin.Context) {
+		id, version, ok := ipIDVersion(c)
+		if !ok {
+			return
+		}
+		var input IPStatusChangeRequest
+		raw, ok := bindIdempotentJSON(c, &input)
+		if !ok {
+			return
+		}
+		current, _ := identity.CurrentAdminFromContext(c)
+		executeIdempotent(c, current, service.db, raw, http.StatusOK, func() (map[string]any, string, error) {
+			return service.Resume(c.Request.Context(), current, id, version, input, c.ClientIP())
+		})
+	})
 	// 评估报告不作为城市运营录入IP的必填项；城市运营和版权/合规均可在各自允许的状态补传。
 	evaluation := protected.Group("", identity.RequireAnyPermission(cityIPPermission, "IP_REVIEW_COMPLIANCE"))
 	evaluation.POST("/ips/:ipId/evaluation-reports", func(c *gin.Context) {
@@ -242,7 +257,7 @@ func ipErrorStatus(code string) int {
 		return http.StatusForbidden
 	case "VERSION_CONFLICT":
 		return http.StatusConflict
-	case "STATE_TRANSITION_NOT_ALLOWED", "IP_DCI_CERTIFICATE_REQUIRED", "CONTENT_DETECTION_REJECTED", "CONTENT_DETECTION_UNAVAILABLE":
+	case "STATE_TRANSITION_NOT_ALLOWED", "IP_DCI_CERTIFICATE_REQUIRED", "IP_LISTING_PREREQUISITE_MISSING", "CONTENT_DETECTION_REJECTED", "CONTENT_DETECTION_UNAVAILABLE":
 		return http.StatusUnprocessableEntity
 	case "EXTERNAL_SERVICE_UNAVAILABLE", "EVIDENCE_UNAVAILABLE", "EVIDENCE_NOT_CONFIRMED":
 		return http.StatusBadGateway
@@ -290,7 +305,7 @@ func respond(c *gin.Context, status int, data map[string]any, code string, err e
 		httpx.AbortWithError(c, httpx.NewError(http.StatusForbidden, code, "无权操作该城市IP"))
 	case "VERSION_CONFLICT":
 		httpx.AbortWithError(c, httpx.NewError(http.StatusConflict, code, "数据已更新，请刷新后重试"))
-	case "STATE_TRANSITION_NOT_ALLOWED", "IP_DCI_CERTIFICATE_REQUIRED", "CONTENT_DETECTION_REJECTED", "CONTENT_DETECTION_UNAVAILABLE":
+	case "STATE_TRANSITION_NOT_ALLOWED", "IP_DCI_CERTIFICATE_REQUIRED", "IP_LISTING_PREREQUISITE_MISSING", "CONTENT_DETECTION_REJECTED", "CONTENT_DETECTION_UNAVAILABLE":
 		httpx.AbortWithError(c, httpx.NewError(http.StatusUnprocessableEntity, code, "当前IP不满足操作条件"))
 	default:
 		httpx.AbortWithError(c, httpx.NewError(http.StatusBadRequest, code, "IP字段或分账比例不符合要求"))
