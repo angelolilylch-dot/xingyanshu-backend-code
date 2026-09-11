@@ -86,6 +86,9 @@ type IPInput struct {
 type SubmitRequest struct {
 	Comment string `json:"comment" binding:"required,max=500"`
 }
+type IPStatusChangeRequest struct {
+	Comment string `json:"comment" binding:"required,max=500"`
+}
 type DCIRequest struct {
 	ContactName          string `json:"contactName" binding:"required,max=100"`
 	ContactMobile        string `json:"contactMobile" binding:"required,max=32"`

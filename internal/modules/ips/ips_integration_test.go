@@ -153,6 +153,10 @@ func TestIPEntryWithMySQL(t *testing.T) {
 	if auditAction != "IP_RIGHTS_CONFIRMED_AND_LISTED" {
 		t.Fatalf("expected auto-list audit action, got %s", auditAction)
 	}
+	paused, code, err := service.Pause(context.Background(), identity.CurrentAdmin{UserID: 10403, RoleCodes: []string{"PLATFORM_ADMIN"}, PermissionCodes: map[string]struct{}{"AUTH_PLAN_MANAGE": {}}}, ipID, 6, IPStatusChangeRequest{Comment: "运营风险排查"}, "127.0.0.1")
+	if err != nil || code != "" || paused["status"] != "PAUSED" || paused["mallVisible"] != false {
+		t.Fatalf("pause listed IP: data=%#v code=%s err=%v", paused, code, err)
+	}
 }
 
 func TestIPRoutesDoNotExposeManualListing(t *testing.T) {
@@ -163,6 +167,15 @@ func TestIPRoutesDoNotExposeManualListing(t *testing.T) {
 		if route.Method == "POST" && route.Path == "/api/v1/ips/:ipId/list" {
 			t.Fatalf("manual IP listing route must not be exposed")
 		}
+	}
+	foundPause := false
+	for _, route := range router.Routes() {
+		if route.Method == "POST" && route.Path == "/api/v1/ips/:ipId/pause" {
+			foundPause = true
+		}
+	}
+	if !foundPause {
+		t.Fatalf("IP pause route must be exposed")
 	}
 }
 
