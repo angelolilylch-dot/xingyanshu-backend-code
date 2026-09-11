@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
 	"xingyanshu-backend/internal/config"
@@ -132,6 +133,36 @@ func TestIPEntryWithMySQL(t *testing.T) {
 	mustIPExec(t, db.Table("evidence_record").Select("chain_provider").Where("object_type='IP' AND object_id=?", ipID).Scan(&chainProvider).Error)
 	if bindingCount != 1 || successEvidenceCount != 1 || chainProvider != "MOCK_EVIDENCE" {
 		t.Fatalf("expected binding and evidence success, binding=%d evidence=%d provider=%s", bindingCount, successEvidenceCount, chainProvider)
+	}
+	var asset struct {
+		Status      string
+		MallVisible bool `gorm:"column:mall_visible"`
+		Version     uint32
+	}
+	mustIPExec(t, db.Table("ip_asset").Where("id=?", ipID).Take(&asset).Error)
+	if asset.Status != "LISTED" || !asset.MallVisible || asset.Version != 6 {
+		t.Fatalf("expected IP auto-listed in same confirmation, status=%s mallVisible=%v version=%d", asset.Status, asset.MallVisible, asset.Version)
+	}
+	var history struct{ FromStatus, ToStatus string }
+	mustIPExec(t, db.Table("biz_status_history").Where("object_type='IP' AND object_id=?", ipID).Order("id DESC").Take(&history).Error)
+	if history.FromStatus != "PENDING_COMPLIANCE" || history.ToStatus != "LISTED" {
+		t.Fatalf("expected direct status history PENDING_COMPLIANCE -> LISTED, got %s -> %s", history.FromStatus, history.ToStatus)
+	}
+	var auditAction string
+	mustIPExec(t, db.Table("sys_audit_log").Select("action").Where("object_type='IP' AND object_id=?", ipID).Order("id DESC").Take(&auditAction).Error)
+	if auditAction != "IP_RIGHTS_CONFIRMED_AND_LISTED" {
+		t.Fatalf("expected auto-list audit action, got %s", auditAction)
+	}
+}
+
+func TestIPRoutesDoNotExposeManualListing(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	RegisterRoutes(router.Group("/api/v1"), nil, func(c *gin.Context) {})
+	for _, route := range router.Routes() {
+		if route.Method == "POST" && route.Path == "/api/v1/ips/:ipId/list" {
+			t.Fatalf("manual IP listing route must not be exposed")
+		}
 	}
 }
 
