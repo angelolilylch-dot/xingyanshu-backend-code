@@ -48,18 +48,19 @@ type AdminAccountStatusRequest struct {
 }
 
 type managedAccount struct {
-	ID           uint64     `gorm:"column:id"`
-	Username     string     `gorm:"column:username"`
-	PasswordHash string     `gorm:"column:password_hash"`
-	DisplayName  string     `gorm:"column:display_name"`
-	Mobile       *string    `gorm:"column:mobile"`
-	OrgID        uint64     `gorm:"column:org_id"`
-	DataScope    string     `gorm:"column:data_scope"`
-	Status       string     `gorm:"column:status"`
-	Version      uint32     `gorm:"column:version"`
-	LastLoginAt  *time.Time `gorm:"column:last_login_at"`
-	CreatedAt    time.Time  `gorm:"column:created_at"`
-	UpdatedAt    time.Time  `gorm:"column:updated_at"`
+	ID                 uint64     `gorm:"column:id"`
+	Username           string     `gorm:"column:username"`
+	PasswordHash       string     `gorm:"column:password_hash"`
+	MustChangePassword bool       `gorm:"column:must_change_password"`
+	DisplayName        string     `gorm:"column:display_name"`
+	Mobile             *string    `gorm:"column:mobile"`
+	OrgID              uint64     `gorm:"column:org_id"`
+	DataScope          string     `gorm:"column:data_scope"`
+	Status             string     `gorm:"column:status"`
+	Version            uint32     `gorm:"column:version"`
+	LastLoginAt        *time.Time `gorm:"column:last_login_at"`
+	CreatedAt          time.Time  `gorm:"column:created_at"`
+	UpdatedAt          time.Time  `gorm:"column:updated_at"`
 }
 
 func (managedAccount) TableName() string { return "sys_user" }
@@ -125,14 +126,14 @@ func NewAccountService(db *gorm.DB) *AccountService {
 
 // Create 在同一事务内创建账号、绑定唯一角色并写入脱敏审计记录。
 func (s *AccountService) Create(ctx context.Context, operator CurrentAdmin, request AdminAccountCreateRequest, clientIP string) (map[string]any, string, error) {
-	if !IsValidAdminUsername(request.Username) || !validDataScope(request.DataScope) {
+	if !IsValidAdminUsername(request.Username) || !IsValidPassword(request.InitialPassword) || !validDataScope(request.DataScope) {
 		return nil, "VALIDATION_FORMAT_INVALID", nil
 	}
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(request.InitialPassword), accountPasswordBcryptCost)
 	if err != nil {
 		return nil, "INTERNAL_ERROR", err
 	}
-	account := managedAccount{ID: idgen.Next(), Username: request.Username, PasswordHash: string(passwordHash), DisplayName: request.DisplayName, Mobile: optionalMobile(request.Mobile), OrgID: request.OrgID, DataScope: request.DataScope, Status: "ACTIVE", Version: 1}
+	account := managedAccount{ID: idgen.Next(), Username: request.Username, PasswordHash: string(passwordHash), MustChangePassword: true, DisplayName: request.DisplayName, Mobile: optionalMobile(request.Mobile), OrgID: request.OrgID, DataScope: request.DataScope, Status: "ACTIVE", Version: 1}
 	var response map[string]any
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		role, err := findActiveRole(tx, request.RoleCode)

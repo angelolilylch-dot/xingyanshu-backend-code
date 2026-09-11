@@ -19,13 +19,14 @@ const currentAdminKey = "identity.currentAdmin"
 
 // CurrentAdmin 保存受保护请求的当前后台用户、会话、角色、权限和数据范围。
 type CurrentAdmin struct {
-	UserID          uint64
-	SessionID       uint64
-	OrgID           uint64
-	CityCode        string
-	DataScope       string
-	RoleCodes       []string
-	PermissionCodes map[string]struct{}
+	UserID             uint64
+	SessionID          uint64
+	OrgID              uint64
+	CityCode           string
+	DataScope          string
+	RoleCodes          []string
+	PermissionCodes    map[string]struct{}
+	MustChangePassword bool
 }
 
 // RequireAdminAuthentication 校验 Bearer JWT，并确认关联会话和后台账号仍处于有效状态。
@@ -34,6 +35,10 @@ func RequireAdminAuthentication(db *gorm.DB, authCfg config.AuthConfig) gin.Hand
 		current, err := authenticateAdmin(c, db, authCfg)
 		if err != nil {
 			httpx.AbortWithError(c, httpx.NewError(http.StatusUnauthorized, "AUTH_TOKEN_EXPIRED", "登录状态已失效"))
+			return
+		}
+		if current.MustChangePassword && c.Request.URL.Path != "/api/v1/auth/password/change" {
+			httpx.AbortWithError(c, httpx.NewError(http.StatusPreconditionRequired, "AUTH_PASSWORD_CHANGE_REQUIRED", "首次登录或密码已重置，请先修改密码"))
 			return
 		}
 		c.Set(currentAdminKey, current)
@@ -89,7 +94,7 @@ func authenticateAdmin(c *gin.Context, db *gorm.DB, authCfg config.AuthConfig) (
 	if err := db.WithContext(c.Request.Context()).Where("id = ? AND status = ?", userID, "ACTIVE").First(&user).Error; err != nil {
 		return CurrentAdmin{}, err
 	}
-	current := CurrentAdmin{UserID: userID, SessionID: sessionID, OrgID: user.OrgID, DataScope: user.DataScope, PermissionCodes: make(map[string]struct{})}
+	current := CurrentAdmin{UserID: userID, SessionID: sessionID, OrgID: user.OrgID, DataScope: user.DataScope, MustChangePassword: user.MustChangePassword, PermissionCodes: make(map[string]struct{})}
 	if err := loadAuthorization(c, db, &current); err != nil {
 		return CurrentAdmin{}, err
 	}

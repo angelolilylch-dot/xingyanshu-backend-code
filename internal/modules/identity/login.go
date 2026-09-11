@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -32,13 +33,14 @@ func IsValidAdminUsername(value string) bool {
 }
 
 type adminUser struct {
-	ID           uint64
-	Username     string
-	PasswordHash string `gorm:"column:password_hash"`
-	DisplayName  string `gorm:"column:display_name"`
-	OrgID        uint64 `gorm:"column:org_id"`
-	DataScope    string `gorm:"column:data_scope"`
-	Status       string
+	ID                 uint64
+	Username           string
+	PasswordHash       string `gorm:"column:password_hash"`
+	MustChangePassword bool   `gorm:"column:must_change_password"`
+	DisplayName        string `gorm:"column:display_name"`
+	OrgID              uint64 `gorm:"column:org_id"`
+	DataScope          string `gorm:"column:data_scope"`
+	Status             string
 }
 
 type adminRole struct {
@@ -72,11 +74,12 @@ func (adminUser) TableName() string { return "sys_user" }
 type LoginService struct {
 	db      *gorm.DB
 	captcha *CaptchaService
+	redis   *redis.Client
 	cfg     config.AuthConfig
 }
 
-func NewLoginService(db *gorm.DB, captcha *CaptchaService, cfg config.AuthConfig) *LoginService {
-	return &LoginService{db: db, captcha: captcha, cfg: cfg}
+func NewLoginService(db *gorm.DB, captcha *CaptchaService, redisClient *redis.Client, cfg config.AuthConfig) *LoginService {
+	return &LoginService{db: db, captcha: captcha, redis: redisClient, cfg: cfg}
 }
 
 // VerifyCaptcha 供统一登录的不同后台角色分支复用同一套一次性图形验证码校验。
@@ -117,7 +120,95 @@ func (s *LoginService) Login(ctx context.Context, request AdminLoginRequest) (ma
 	if err != nil {
 		return nil, "INTERNAL_ERROR", err
 	}
+	response["mustChangePassword"] = user.MustChangePassword
 	return response, "", nil
+}
+
+// ChangePassword 修改当前账号密码；首次登录和管理员重置后的临时密码必须经过此接口替换。
+func (s *LoginService) ChangePassword(ctx context.Context, current CurrentAdmin, oldPassword, newPassword string) (string, error) {
+	if !IsValidPassword(newPassword) {
+		return "VALIDATION_FORMAT_INVALID", nil
+	}
+	var user adminUser
+	if err := s.db.WithContext(ctx).Where("id = ? AND status = ?", current.UserID, "ACTIVE").First(&user).Error; err != nil {
+		return "AUTH_LOGIN_INVALID", nil
+	}
+	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(oldPassword)) != nil {
+		return "AUTH_LOGIN_INVALID", nil
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), 12)
+	if err != nil {
+		return "INTERNAL_ERROR", err
+	}
+	if err := s.db.WithContext(ctx).Model(&adminUser{}).Where("id = ?", current.UserID).Updates(map[string]any{"password_hash": string(hash), "must_change_password": false, "updated_at": time.Now()}).Error; err != nil {
+		return "INTERNAL_ERROR", err
+	}
+	return "", nil
+}
+
+// ResetPassword 由平台管理员设置临时密码，并强制目标账号下次登录修改。
+func (s *LoginService) ResetPassword(ctx context.Context, userID uint64, newPassword string) (string, error) {
+	if !IsValidPassword(newPassword) {
+		return "VALIDATION_FORMAT_INVALID", nil
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), 12)
+	if err != nil {
+		return "INTERNAL_ERROR", err
+	}
+	result := s.db.WithContext(ctx).Model(&adminUser{}).Where("id = ? AND status = ?", userID, "ACTIVE").Updates(map[string]any{"password_hash": string(hash), "must_change_password": true, "updated_at": time.Now()})
+	if result.Error != nil {
+		return "INTERNAL_ERROR", result.Error
+	}
+	if result.RowsAffected == 0 {
+		return "RESOURCE_NOT_FOUND", nil
+	}
+	if err := s.db.WithContext(ctx).Model(&authSession{}).Where("subject_type = ? AND subject_id = ? AND client_type = ? AND status = ?", "ADMIN", userID, "ADMIN_WEB", "ACTIVE").Updates(map[string]any{"status": "REVOKED", "last_used_at": time.Now()}).Error; err != nil {
+		return "INTERNAL_ERROR", err
+	}
+	return "", nil
+}
+
+// SendPasswordResetSMS 发送管理员找回密码验证码；生产环境需替换为真实短信 Provider。
+func (s *LoginService) SendPasswordResetSMS(ctx context.Context, mobile string, testMode bool) (map[string]any, string, error) {
+	var user adminUser
+	if err := s.db.WithContext(ctx).Where("mobile = ? AND status = ?", mobile, "ACTIVE").First(&user).Error; err != nil {
+		return map[string]any{"expiresIn": 300}, "", nil
+	}
+	code := "123456"
+	if err := s.redis.Set(ctx, "admin:sms:password-reset:"+mobile, code, 5*time.Minute).Err(); err != nil {
+		return nil, "SMS_UNAVAILABLE", err
+	}
+	data := map[string]any{"expiresIn": 300}
+	if testMode {
+		data["mockCode"] = code
+	}
+	return data, "", nil
+}
+
+// ResetPasswordBySMS 通过手机号和一次性短信验证码设置新密码。
+func (s *LoginService) ResetPasswordBySMS(ctx context.Context, mobile, code, newPassword string) (string, error) {
+	if !IsValidPassword(newPassword) {
+		return "VALIDATION_FORMAT_INVALID", nil
+	}
+	value, err := s.redis.Eval(ctx, "local v=redis.call('GET',KEYS[1]); if v then redis.call('DEL',KEYS[1]); end; return v", []string{"admin:sms:password-reset:" + mobile}).Text()
+	if err == redis.Nil || value != code {
+		return "SMS_CODE_INVALID", nil
+	}
+	if err != nil {
+		return "SMS_UNAVAILABLE", err
+	}
+	var user adminUser
+	if err := s.db.WithContext(ctx).Where("mobile = ? AND status = ?", mobile, "ACTIVE").First(&user).Error; err != nil {
+		return "AUTH_LOGIN_INVALID", nil
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), 12)
+	if err != nil {
+		return "INTERNAL_ERROR", err
+	}
+	if err := s.db.WithContext(ctx).Model(&adminUser{}).Where("id = ?", user.ID).Updates(map[string]any{"password_hash": string(hash), "must_change_password": false, "updated_at": time.Now()}).Error; err != nil {
+		return "INTERNAL_ERROR", err
+	}
+	return "", nil
 }
 
 // RefreshRequest 是刷新管理员会话令牌的请求体。

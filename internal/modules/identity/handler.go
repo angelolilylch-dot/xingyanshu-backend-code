@@ -7,6 +7,22 @@ import (
 	"xingyanshu-backend/internal/platform/httpx"
 )
 
+type passwordChangeRequest struct {
+	OldPassword string `json:"oldPassword" binding:"required"`
+	NewPassword string `json:"newPassword" binding:"required,min=8,max=64"`
+}
+type passwordResetRequest struct {
+	NewPassword string `json:"newPassword" binding:"required,min=8,max=64"`
+}
+type passwordSMSRequest struct {
+	Mobile string `json:"mobile" binding:"required"`
+}
+type passwordResetSMSRequest struct {
+	Mobile      string `json:"mobile" binding:"required"`
+	SMSCode     string `json:"smsCode" binding:"required,len=6"`
+	NewPassword string `json:"newPassword" binding:"required,min=8,max=64"`
+}
+
 // RegisterPublicRoutes 注册无需登录即可访问的认证基础接口。
 func RegisterPublicRoutes(group *gin.RouterGroup, captcha *CaptchaService, login *LoginService) {
 	group.GET("/auth/captcha", func(c *gin.Context) {
@@ -33,17 +49,62 @@ func RegisterPublicRoutes(group *gin.RouterGroup, captcha *CaptchaService, login
 		}
 		httpx.Success(c, http.StatusOK, data)
 	})
+	group.POST("/auth/password-reset/sms/send", func(c *gin.Context) {
+		var request passwordSMSRequest
+		if !httpx.BindJSON(c, &request) {
+			return
+		}
+		data, code, err := login.SendPasswordResetSMS(c.Request.Context(), request.Mobile, false)
+		if err != nil {
+			httpx.AbortWithError(c, httpx.NewError(http.StatusServiceUnavailable, code, "短信服务暂不可用"))
+			return
+		}
+		httpx.Success(c, http.StatusOK, data)
+	})
+	group.POST("/auth/password-reset", func(c *gin.Context) {
+		var request passwordResetSMSRequest
+		if !httpx.BindJSON(c, &request) {
+			return
+		}
+		code, err := login.ResetPasswordBySMS(c.Request.Context(), request.Mobile, request.SMSCode, request.NewPassword)
+		if err != nil {
+			httpx.AbortWithError(c, httpx.NewError(http.StatusInternalServerError, "INTERNAL_ERROR", "密码找回失败"))
+			return
+		}
+		if code != "" {
+			httpx.AbortWithError(c, httpx.NewError(http.StatusUnprocessableEntity, code, "密码找回信息不正确"))
+			return
+		}
+		httpx.Success(c, http.StatusOK, map[string]any{"reset": true})
+	})
 }
 
 // RegisterProtectedRoutes 注册已经完成后台登录校验的认证接口。
 func RegisterProtectedRoutes(group *gin.RouterGroup, login *LoginService, accounts *AccountService, organizations *OrganizationService, middleware gin.HandlerFunc) {
 	protected := group.Group("", middleware)
-	RegisterAccountRoutes(protected, accounts)
+	protected.POST("/auth/password/change", func(c *gin.Context) {
+		var request passwordChangeRequest
+		if !httpx.BindJSON(c, &request) {
+			return
+		}
+		current, _ := CurrentAdminFromContext(c)
+		code, err := login.ChangePassword(c.Request.Context(), current, request.OldPassword, request.NewPassword)
+		if err != nil {
+			httpx.AbortWithError(c, httpx.NewError(http.StatusInternalServerError, "INTERNAL_ERROR", "密码修改失败"))
+			return
+		}
+		if code != "" {
+			httpx.AbortWithError(c, httpx.NewError(http.StatusUnprocessableEntity, code, "密码修改信息不正确"))
+			return
+		}
+		httpx.Success(c, http.StatusOK, map[string]any{"changed": true})
+	})
+	RegisterAccountRoutes(protected, accounts, login)
 	RegisterOrganizationRoutes(protected, organizations)
 }
 
 // RegisterAccountRoutes 注册仅平台管理员可调用的后台账号管理接口。
-func RegisterAccountRoutes(group *gin.RouterGroup, accounts *AccountService) {
+func RegisterAccountRoutes(group *gin.RouterGroup, accounts *AccountService, login *LoginService) {
 	admin := group.Group("", RequireAnyPermission(adminAccountPermission))
 	admin.GET("/admin/accounts", func(c *gin.Context) {
 		orgID, _ := strconv.ParseUint(c.Query("orgId"), 10, 64)
@@ -63,6 +124,30 @@ func RegisterAccountRoutes(group *gin.RouterGroup, accounts *AccountService) {
 		current, _ := CurrentAdminFromContext(c)
 		data, code, err := accounts.Create(c.Request.Context(), current, request, c.ClientIP())
 		writeAccountServiceResponse(c, http.StatusCreated, data, code, err)
+	})
+	admin.POST("/admin/accounts/:userId/password/reset", func(c *gin.Context) {
+		userID, ok := parseAccountUserID(c)
+		if !ok {
+			return
+		}
+		var request passwordResetRequest
+		if !httpx.BindJSON(c, &request) {
+			return
+		}
+		code, err := login.ResetPassword(c.Request.Context(), userID, request.NewPassword)
+		if err != nil {
+			httpx.AbortWithError(c, httpx.NewError(http.StatusInternalServerError, "INTERNAL_ERROR", "密码重置失败"))
+			return
+		}
+		if code == "RESOURCE_NOT_FOUND" {
+			httpx.AbortWithError(c, httpx.NewError(http.StatusNotFound, code, "账号不存在或已停用"))
+			return
+		}
+		if code != "" {
+			httpx.AbortWithError(c, httpx.NewError(http.StatusUnprocessableEntity, code, "密码格式不正确"))
+			return
+		}
+		httpx.Success(c, http.StatusOK, map[string]any{"reset": true, "mustChangePassword": true})
 	})
 	admin.GET("/admin/accounts/:userId", func(c *gin.Context) {
 		userID, ok := parseAccountUserID(c)
