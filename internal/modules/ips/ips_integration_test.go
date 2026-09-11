@@ -161,6 +161,10 @@ func TestIPEntryWithMySQL(t *testing.T) {
 	if err != nil || code != "" || resumed["status"] != "LISTED" || resumed["mallVisible"] != true {
 		t.Fatalf("resume paused IP: data=%#v code=%s err=%v", resumed, code, err)
 	}
+	delisted, code, err := service.Delist(context.Background(), identity.CurrentAdmin{UserID: 10403, RoleCodes: []string{"PLATFORM_ADMIN"}, PermissionCodes: map[string]struct{}{"AUTH_PLAN_MANAGE": {}}}, ipID, 8, IPStatusChangeRequest{Comment: "停止授权销售"}, "127.0.0.1")
+	if err != nil || code != "" || delisted["status"] != "DELISTED" || delisted["mallVisible"] != false {
+		t.Fatalf("delist listed IP: data=%#v code=%s err=%v", delisted, code, err)
+	}
 }
 
 func TestIPRoutesDoNotExposeManualListing(t *testing.T) {
@@ -189,6 +193,15 @@ func TestIPRoutesDoNotExposeManualListing(t *testing.T) {
 	}
 	if !foundResume {
 		t.Fatalf("IP resume route must be exposed")
+	}
+	foundDelist := false
+	for _, route := range router.Routes() {
+		if route.Method == "POST" && route.Path == "/api/v1/ips/:ipId/delist" {
+			foundDelist = true
+		}
+	}
+	if !foundDelist {
+		t.Fatalf("IP delist route must be exposed")
 	}
 }
 

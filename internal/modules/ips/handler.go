@@ -188,6 +188,21 @@ func RegisterRoutes(group *gin.RouterGroup, service *Service, auth gin.HandlerFu
 			return service.Resume(c.Request.Context(), current, id, version, input, c.ClientIP())
 		})
 	})
+	listing.POST("/ips/:ipId/delist", func(c *gin.Context) {
+		id, version, ok := ipIDVersion(c)
+		if !ok {
+			return
+		}
+		var input IPStatusChangeRequest
+		raw, ok := bindIdempotentJSON(c, &input)
+		if !ok {
+			return
+		}
+		current, _ := identity.CurrentAdminFromContext(c)
+		executeIdempotent(c, current, service.db, raw, http.StatusOK, func() (map[string]any, string, error) {
+			return service.Delist(c.Request.Context(), current, id, version, input, c.ClientIP())
+		})
+	})
 	// 评估报告不作为城市运营录入IP的必填项；城市运营和版权/合规均可在各自允许的状态补传。
 	evaluation := protected.Group("", identity.RequireAnyPermission(cityIPPermission, "IP_REVIEW_COMPLIANCE"))
 	evaluation.POST("/ips/:ipId/evaluation-reports", func(c *gin.Context) {

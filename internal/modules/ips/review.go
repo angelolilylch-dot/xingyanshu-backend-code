@@ -388,6 +388,54 @@ func (s *Service) Resume(ctx context.Context, current identity.CurrentAdmin, ipI
 	return map[string]any{"id": fmt.Sprint(ipID), "status": "LISTED", "mallVisible": true, "version": version + 1}, "", nil
 }
 
+// Delist 将 IP 从商城下架；历史授权和订单继续保留并按原规则履约。
+func (s *Service) Delist(ctx context.Context, current identity.CurrentAdmin, ipID uint64, version uint32, input IPStatusChangeRequest, clientIP string) (map[string]any, string, error) {
+	if !current.HasPermission("AUTH_PLAN_MANAGE") {
+		return nil, "AUTH_FORBIDDEN", nil
+	}
+	if strings.TrimSpace(input.Comment) == "" {
+		return nil, "VALIDATION_REQUIRED", nil
+	}
+	var asset struct {
+		Status  string
+		Version uint32
+	}
+	if err := s.db.WithContext(ctx).Table("ip_asset").Where("id=?", ipID).Take(&asset).Error; err != nil {
+		return nil, "RESOURCE_NOT_FOUND", nil
+	}
+	if asset.Version != version {
+		return nil, "VERSION_CONFLICT", nil
+	}
+	if asset.Status != "LISTED" && asset.Status != "PAUSED" {
+		return nil, "STATE_TRANSITION_NOT_ALLOWED", nil
+	}
+	now := time.Now()
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Table("ip_asset").Where("id=? AND version=? AND status IN ('LISTED','PAUSED')", ipID, version).Updates(map[string]any{
+			"status": "DELISTED", "mall_visible": false, "status_reason": input.Comment,
+			"version": version + 1, "updated_by": current.UserID, "status_changed_at": now,
+			"status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(current.UserID),
+		})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		if err := audit.WriteStatusHistory(tx, "IP", ipID, asset.Status, "DELISTED", input.Comment, ipOperator(current, clientIP)); err != nil {
+			return err
+		}
+		return audit.WriteLog(tx, "IP_DELISTED", "IP", ipID, map[string]any{"status": asset.Status, "mallVisible": asset.Status == "LISTED"}, map[string]any{"status": "DELISTED", "mallVisible": false, "reason": input.Comment}, "SUCCESS", ipOperator(current, clientIP))
+	})
+	if err == gorm.ErrRecordNotFound {
+		return nil, "VERSION_CONFLICT", nil
+	}
+	if err != nil {
+		return nil, "INTERNAL_ERROR", err
+	}
+	return map[string]any{"id": fmt.Sprint(ipID), "status": "DELISTED", "mallVisible": false, "version": version + 1}, "", nil
+}
+
 type complianceAsset struct {
 	Status                string `gorm:"column:status"`
 	Version               uint32 `gorm:"column:version"`
