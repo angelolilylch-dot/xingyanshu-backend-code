@@ -96,6 +96,21 @@ func (s *LoginService) Login(ctx context.Context, request AdminLoginRequest) (ma
 	if !ok {
 		return nil, "AUTH_CAPTCHA_INVALID", nil
 	}
+	return s.loginAdmin(ctx, request)
+}
+
+// LoginAdminAfterCaptcha 在统一登录入口已完成验证码校验后验证后台账号，避免验证码被重复消费。
+func (s *LoginService) LoginAdminAfterCaptcha(ctx context.Context, request AdminLoginRequest) (map[string]any, string, error) {
+	return s.loginAdmin(ctx, request)
+}
+
+// IsAdminAccount 判断账号是否属于后台账号，用于统一登录入口自动识别账号类型。
+func (s *LoginService) IsAdminAccount(ctx context.Context, username string) bool {
+	var user adminUser
+	return s.db.WithContext(ctx).Select("id").Where("username = ?", username).First(&user).Error == nil
+}
+
+func (s *LoginService) loginAdmin(ctx context.Context, request AdminLoginRequest) (map[string]any, string, error) {
 	var user adminUser
 	if err := s.db.WithContext(ctx).Where("username = ?", request.Username).First(&user).Error; err != nil {
 		return nil, "AUTH_LOGIN_INVALID", nil

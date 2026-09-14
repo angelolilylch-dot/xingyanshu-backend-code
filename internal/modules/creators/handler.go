@@ -15,7 +15,6 @@ import (
 func RegisterRoutes(group *gin.RouterGroup, service *Service, loginService *identity.LoginService, fileService *files.Service, creatorAuth gin.HandlerFunc, adminAuth gin.HandlerFunc) {
 	group.POST("/auth/login", func(c *gin.Context) {
 		var request struct {
-			LoginType   string `json:"loginType" binding:"required,oneof=ADMIN CREATOR"`
 			Account     string `json:"account" binding:"required"`
 			Password    string `json:"password" binding:"required"`
 			CaptchaID   string `json:"captchaId" binding:"required"`
@@ -24,16 +23,7 @@ func RegisterRoutes(group *gin.RouterGroup, service *Service, loginService *iden
 		if !httpx.BindJSON(c, &request) {
 			return
 		}
-		if request.LoginType == "ADMIN" {
-			data, code, err := loginService.Login(c.Request.Context(), identity.AdminLoginRequest{Username: request.Account, Password: request.Password, CaptchaID: request.CaptchaID, CaptchaCode: request.CaptchaCode})
-			if err != nil || code != "" {
-				httpx.AbortWithError(c, httpx.NewError(http.StatusUnauthorized, "AUTH_LOGIN_INVALID", "账号、密码或验证码错误"))
-				return
-			}
-			httpx.Success(c, http.StatusOK, data)
-			return
-		}
-		// 创作者同属管理后台角色，登录前也必须完成一次性图形验证码校验。
+		// 统一登录只校验一次验证码，再根据账号是否存在于后台账号表自动识别账号类型。
 		ok, err := loginService.VerifyCaptcha(c.Request.Context(), request.CaptchaID, request.CaptchaCode)
 		if err != nil {
 			httpx.AbortWithError(c, httpx.NewError(http.StatusServiceUnavailable, "CAPTCHA_UNAVAILABLE", "验证码服务暂不可用"))
@@ -41,6 +31,15 @@ func RegisterRoutes(group *gin.RouterGroup, service *Service, loginService *iden
 		}
 		if !ok {
 			httpx.AbortWithError(c, httpx.NewError(http.StatusUnauthorized, "AUTH_CAPTCHA_INVALID", "图形验证码错误或已失效"))
+			return
+		}
+		if loginService.IsAdminAccount(c.Request.Context(), request.Account) {
+			data, code, err := loginService.LoginAdminAfterCaptcha(c.Request.Context(), identity.AdminLoginRequest{Username: request.Account, Password: request.Password})
+			if err != nil || code != "" {
+				httpx.AbortWithError(c, httpx.NewError(http.StatusUnauthorized, "AUTH_LOGIN_INVALID", "账号、密码或验证码错误"))
+				return
+			}
+			httpx.Success(c, http.StatusOK, data)
 			return
 		}
 		data, code, err := service.Login(c.Request.Context(), LoginRequest{Mobile: request.Account, Password: request.Password})
