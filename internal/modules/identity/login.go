@@ -72,14 +72,15 @@ func (adminUser) TableName() string { return "sys_user" }
 
 // LoginService 负责管理员登录的验证码、密码和会话令牌处理。
 type LoginService struct {
-	db      *gorm.DB
-	captcha *CaptchaService
-	redis   *redis.Client
-	cfg     config.AuthConfig
+	db          *gorm.DB
+	captcha     *CaptchaService
+	redis       *redis.Client
+	cfg         config.AuthConfig
+	environment string
 }
 
-func NewLoginService(db *gorm.DB, captcha *CaptchaService, redisClient *redis.Client, cfg config.AuthConfig) *LoginService {
-	return &LoginService{db: db, captcha: captcha, redis: redisClient, cfg: cfg}
+func NewLoginService(db *gorm.DB, captcha *CaptchaService, redisClient *redis.Client, cfg config.AuthConfig, environment string) *LoginService {
+	return &LoginService{db: db, captcha: captcha, redis: redisClient, cfg: cfg, environment: environment}
 }
 
 // VerifyCaptcha 供统一登录的不同后台角色分支复用同一套一次性图形验证码校验。
@@ -183,8 +184,8 @@ func (s *LoginService) ResetPassword(ctx context.Context, userID uint64, newPass
 	return "", nil
 }
 
-// SendPasswordResetSMS 发送管理员找回密码验证码；生产环境需替换为真实短信 Provider。
-func (s *LoginService) SendPasswordResetSMS(ctx context.Context, mobile string, testMode bool) (map[string]any, string, error) {
+// SendPasswordResetSMS 发送管理员找回密码验证码；测试环境返回 mockCode，生产环境需接入真实短信 Provider。
+func (s *LoginService) SendPasswordResetSMS(ctx context.Context, mobile string) (map[string]any, string, error) {
 	var user adminUser
 	if err := s.db.WithContext(ctx).Where("mobile = ? AND status = ?", mobile, "ACTIVE").First(&user).Error; err != nil {
 		return map[string]any{"expiresIn": 300}, "", nil
@@ -194,7 +195,7 @@ func (s *LoginService) SendPasswordResetSMS(ctx context.Context, mobile string, 
 		return nil, "SMS_UNAVAILABLE", err
 	}
 	data := map[string]any{"expiresIn": 300}
-	if testMode {
+	if s.environment == "test" {
 		data["mockCode"] = code
 	}
 	return data, "", nil

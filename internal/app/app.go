@@ -47,7 +47,7 @@ func RunServer(cfg config.Config, configPath string) error {
 	defer cancelWatch()
 	config.WatchFilePolicy(watchContext, configPath, cfg.File.WatchInterval, filePolicy)
 	captchaService := identity.NewCaptchaService(redisClient)
-	loginService := identity.NewLoginService(db, captchaService, redisClient, cfg.Auth)
+	loginService := identity.NewLoginService(db, captchaService, redisClient, cfg.Auth, cfg.App.Environment)
 	accountService := identity.NewAccountService(db)
 	organizationService := identity.NewOrganizationService(db)
 	foundationService := foundation.NewService(db)

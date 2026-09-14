@@ -54,7 +54,7 @@ func RegisterPublicRoutes(group *gin.RouterGroup, captcha *CaptchaService, login
 		if !httpx.BindJSON(c, &request) {
 			return
 		}
-		data, code, err := login.SendPasswordResetSMS(c.Request.Context(), request.Mobile, false)
+		data, code, err := login.SendPasswordResetSMS(c.Request.Context(), request.Mobile)
 		if err != nil {
 			httpx.AbortWithError(c, httpx.NewError(http.StatusServiceUnavailable, code, "短信服务暂不可用"))
 			return
