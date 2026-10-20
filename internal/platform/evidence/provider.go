@@ -17,10 +17,11 @@ type SubmitRequest struct {
 
 // SubmitResult 只有返回可验证回执且状态为 SUCCESS 时，业务才可标记为存证成功。
 type SubmitResult struct {
-	Provider  string
-	RequestNo string
-	Status    string
-	ReceiptNo string
+	Provider        string
+	RequestNo       string
+	Status          string
+	ReceiptNo       string
+	TransactionHash string
 }
 
 // Provider 是存证服务适配器；真实服务上线前不能以 Mock 成功替代回执。

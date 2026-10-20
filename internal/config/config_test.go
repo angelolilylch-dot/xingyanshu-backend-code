@@ -34,6 +34,18 @@ func TestContentSafetyConfigRejectsPartialCredentials(t *testing.T) {
 	}
 }
 
+func TestContentSafetyMockOnlyAllowedInTest(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.ContentSafety = ContentSafetyConfig{Provider: "mock"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("mock provider should be valid in test: %v", err)
+	}
+	cfg.App.Environment = "production"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("mock provider must be rejected outside test")
+	}
+}
+
 func validTestConfig() Config {
 	var cfg Config
 	cfg.App.Name = "xingyanshu"

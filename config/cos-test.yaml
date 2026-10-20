@@ -6,6 +6,11 @@ app:
   worker:
     poll_interval: 5s
 
+logging:
+  directory: logs/test
+  retention_days: 30
+  also_stdout: true
+
 database:
   driver: mysql
   host: 127.0.0.1

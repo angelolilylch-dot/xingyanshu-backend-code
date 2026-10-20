@@ -2,6 +2,7 @@
 package files
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -167,6 +168,98 @@ func (s *Service) Upload(ctx context.Context, operator uploadOperator, header *m
 // UploadForCreator 复用统一文件策略和 COS 上传链路，为创作者的委托书等私有资料提供上传能力。
 func (s *Service) UploadForCreator(ctx context.Context, creatorUserID uint64, clientIP string, header *multipart.FileHeader, source multipart.File) (map[string]any, string, error) {
 	return s.Upload(ctx, uploadOperator{ID: creatorUserID, RoleCode: "CREATOR", ClientIP: clientIP}, header, source)
+}
+
+// CreateGeneratedForCreator 保存服务端生成的创作者私有文件，例如已填充主体资料的委托书草稿。
+// 调用方只能传入受控内容，不能用它绕过普通上传的文件类型校验。
+func (s *Service) CreateGeneratedForCreator(ctx context.Context, creatorUserID uint64, clientIP, name, mimeType string, content []byte) (map[string]any, string, error) {
+	name = filepath.Base(strings.TrimSpace(name))
+	if name == "." || name == "" || len(name) > 512 || len(content) == 0 || (mimeType != "application/vnd.openxmlformats-officedocument.wordprocessingml.document" && mimeType != "application/pdf") {
+		return nil, "VALIDATION_FORMAT_INVALID", nil
+	}
+	id := idgen.Next()
+	now := time.Now()
+	extension := "docx"
+	if mimeType == "application/pdf" {
+		extension = "pdf"
+	}
+	key := fmt.Sprintf("%s/documents/%04d/%02d/%d.%s", s.keyPrefix, now.Year(), now.Month(), id, extension)
+	item := fileObject{ID: id, Status: "UPLOADING", Version: 1, CreatedBy: creatorUserID, FileNo: fmt.Sprintf("FILE-%d", id), StorageKey: key, OriginalName: name, MimeType: mimeType, SecurityLevel: "PRIVATE", UploadStatus: "UPLOADING"}
+	operator := uploadOperator{ID: creatorUserID, RoleCode: "CREATOR", ClientIP: clientIP}
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&item).Error; err != nil {
+			return err
+		}
+		if err := audit.WriteStatusHistory(tx, "FILE", id, "", "UPLOADING", "开始生成私有文件", toAuditOperator(operator)); err != nil {
+			return err
+		}
+		return audit.WriteLog(tx, "FILE_GENERATION_STARTED", "FILE", id, nil, fileResponse(item), "SUCCESS", toAuditOperator(operator))
+	}); err != nil {
+		return mapDatabaseError(err)
+	}
+
+	hash := sha256.Sum256(content)
+	if err := s.storage.Put(ctx, key, mimeType, bytes.NewReader(content)); err != nil {
+		_ = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			return tx.Model(&fileObject{}).Where("id=? AND version=?", id, 1).Updates(map[string]any{"status": "FAILED", "upload_status": "FAILED", "status_reason_code": "STORAGE_UPLOAD_FAILED", "updated_by": creatorUserID, "version": 2}).Error
+		})
+		return nil, "FILE_UPLOAD_FAILED", err
+	}
+	item.Status, item.UploadStatus, item.FileSize, item.FileHash, item.Version = "ACTIVE", "SUCCESS", int64(len(content)), hex.EncodeToString(hash[:]), 2
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&fileObject{}).Where("id=? AND version=?", id, 1).Updates(map[string]any{"status": item.Status, "upload_status": item.UploadStatus, "file_size": item.FileSize, "file_hash": item.FileHash, "updated_by": creatorUserID, "version": item.Version}).Error; err != nil {
+			return err
+		}
+		if err := audit.WriteStatusHistory(tx, "FILE", id, "UPLOADING", "ACTIVE", "私有文件生成成功", toAuditOperator(operator)); err != nil {
+			return err
+		}
+		return audit.WriteLog(tx, "FILE_GENERATED", "FILE", id, nil, fileResponse(item), "SUCCESS", toAuditOperator(operator))
+	}); err != nil {
+		return nil, "INTERNAL_ERROR", err
+	}
+	return fileResponse(item), "", nil
+}
+
+// CreateDownloadURLForCreator 只允许创作者本人重新签发其私有文件的短期下载链接。
+func (s *Service) CreateDownloadURLForCreator(ctx context.Context, creatorUserID uint64, clientIP string, fileID uint64) (map[string]any, string, error) {
+	var item fileObject
+	if err := s.db.WithContext(ctx).Where("id=? AND created_by=? AND status='ACTIVE' AND upload_status='SUCCESS'", fileID, creatorUserID).First(&item).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, "RESOURCE_NOT_FOUND", nil
+		}
+		return nil, "INTERNAL_ERROR", err
+	}
+	url, err := s.storage.SignDownloadURL(ctx, item.StorageKey, s.ttl)
+	if err != nil {
+		return nil, "FILE_DOWNLOAD_URL_FAILED", err
+	}
+	response := map[string]any{"fileId": fmt.Sprint(item.ID), "downloadURL": url, "expiresAt": time.Now().Add(s.ttl)}
+	operator := uploadOperator{ID: creatorUserID, RoleCode: "CREATOR", ClientIP: clientIP}
+	if err := audit.WriteLog(s.db.WithContext(ctx), "FILE_DOWNLOAD_URL_ISSUED", "FILE", item.ID, nil, map[string]any{"fileId": response["fileId"], "expiresAt": response["expiresAt"]}, "SUCCESS", toAuditOperator(operator)); err != nil {
+		return nil, "INTERNAL_ERROR", err
+	}
+	return response, "", nil
+}
+
+// CreateDownloadURLForAuthorizedCreator 在调用方已完成授权与素材范围校验后，为非本人上传的授权素材签发短期链接。
+func (s *Service) CreateDownloadURLForAuthorizedCreator(ctx context.Context, creatorUserID uint64, clientIP string, fileID uint64) (map[string]any, string, error) {
+	var item fileObject
+	if err := s.db.WithContext(ctx).Where("id=? AND status='ACTIVE' AND upload_status='SUCCESS'", fileID).First(&item).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, "RESOURCE_NOT_FOUND", nil
+		}
+		return nil, "INTERNAL_ERROR", err
+	}
+	url, err := s.storage.SignDownloadURL(ctx, item.StorageKey, s.ttl)
+	if err != nil {
+		return nil, "FILE_DOWNLOAD_URL_FAILED", err
+	}
+	response := map[string]any{"fileId": fmt.Sprint(item.ID), "downloadURL": url, "expiresAt": time.Now().Add(s.ttl)}
+	op := uploadOperator{ID: creatorUserID, RoleCode: "CREATOR", ClientIP: clientIP}
+	if err := audit.WriteLog(s.db.WithContext(ctx), "AUTHORIZED_MATERIAL_DOWNLOAD_URL_ISSUED", "FILE", item.ID, nil, response, "SUCCESS", toAuditOperator(op)); err != nil {
+		return nil, "INTERNAL_ERROR", err
+	}
+	return response, "", nil
 }
 
 func (s *Service) Get(ctx context.Context, current identity.CurrentAdmin, fileID uint64) (map[string]any, string, error) {

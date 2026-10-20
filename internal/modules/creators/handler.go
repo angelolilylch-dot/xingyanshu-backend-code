@@ -85,6 +85,16 @@ func RegisterRoutes(group *gin.RouterGroup, service *Service, loginService *iden
 		}
 		current, _ := CurrentCreatorFromContext(c)
 		data, code, err := service.VerifyIdentity(c.Request.Context(), current, request, c.ClientIP())
+		if err == nil && code == "" && request.SubjectType != "PERSONAL" {
+			draft, draftCode, draftErr := service.GenerateAuthorizationLetterDraft(c.Request.Context(), current, fileService, c.ClientIP())
+			if draftErr != nil || draftCode != "" {
+				respond(c, http.StatusInternalServerError, nil, draftCode, draftErr)
+				return
+			}
+			for key, value := range draft {
+				data[key] = value
+			}
+		}
 		respond(c, http.StatusCreated, data, code, err)
 	})
 	creator.GET("/identity-verifications/latest", func(c *gin.Context) {
@@ -94,6 +104,11 @@ func RegisterRoutes(group *gin.RouterGroup, service *Service, loginService *iden
 	})
 	creator.GET("/authorization-letter-template", func(c *gin.Context) {
 		httpx.Success(c, http.StatusOK, map[string]any{"templateName": "创作者主体授权委托书", "format": "TEXT", "variables": []string{"${principal_name}", "${principal_certificate_no}", "${principal_type}", "${agent_name}", "${agent_id_type}", "${agent_id_no}", "${agent_mobile}", "${authorization_start_date}", "${authorization_end_date}", "${principal_seal}", "${principal_representative_name}", "${signed_date}"}, "content": authorizationLetterTemplate})
+	})
+	creator.GET("/authorization-letter-draft", func(c *gin.Context) {
+		current, _ := CurrentCreatorFromContext(c)
+		data, code, err := service.AuthorizationLetterDraft(c.Request.Context(), current, fileService, c.ClientIP())
+		respond(c, http.StatusOK, data, code, err)
 	})
 	creator.POST("/authorization-letters", func(c *gin.Context) {
 		var request LetterRequest
@@ -171,12 +186,18 @@ func respond(c *gin.Context, status int, data map[string]any, code string, err e
 		httpx.AbortWithError(c, httpx.NewError(http.StatusUnprocessableEntity, code, "短信验证码错误或已失效"))
 	case "RESOURCE_CONFLICT", "IDENTITY_ALREADY_VERIFIED", "VERSION_CONFLICT":
 		httpx.AbortWithError(c, httpx.NewError(http.StatusConflict, code, "账号或实名主体已存在，或已完成认证"))
-	case "RESOURCE_NOT_FOUND":
-		httpx.AbortWithError(c, httpx.NewError(http.StatusNotFound, code, "创作者或委托书文件不存在"))
+	case "RESOURCE_NOT_FOUND", "CREATOR_NOT_FOUND":
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, "CREATOR_NOT_FOUND", "创作者不存在或不可用", map[string]any{"resourceType": "CREATOR"}))
+	case "IDENTITY_VERIFICATION_NOT_FOUND":
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, code, "实名认证记录不存在", map[string]any{"resourceType": "IDENTITY_VERIFICATION"}))
+	case "AUTHORIZATION_LETTER_FILE_NOT_FOUND":
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, code, "创作者授权委托书文件不存在或不可用", map[string]any{"resourceType": "FILE", "field": "fileId"}))
 	case "STATE_TRANSITION_NOT_ALLOWED":
-		httpx.AbortWithError(c, httpx.NewError(http.StatusUnprocessableEntity, code, "个人主体无需上传授权委托书"))
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusUnprocessableEntity, code, "当前创作者状态不允许执行该操作", data))
 	case "SMS_UNAVAILABLE":
 		httpx.AbortWithError(c, httpx.NewError(http.StatusBadGateway, code, "短信服务暂不可用"))
+	case "FILE_UPLOAD_FAILED", "FILE_DOWNLOAD_URL_FAILED":
+		httpx.AbortWithError(c, httpx.NewError(http.StatusBadGateway, code, "委托书草稿文件服务暂不可用"))
 	default:
 		httpx.AbortWithError(c, httpx.NewError(http.StatusBadRequest, code, "创作者身份操作失败"))
 	}

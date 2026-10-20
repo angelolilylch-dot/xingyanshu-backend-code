@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
 
+	"xingyanshu-backend/internal/bootstrap"
 	"xingyanshu-backend/internal/config"
 	"xingyanshu-backend/internal/database"
 	"xingyanshu-backend/internal/modules/creators"
@@ -93,8 +95,16 @@ func TestPasswordLifecycleWithMySQLAndRedis(t *testing.T) {
 	}
 
 	normal := postJSON(t, router, "/api/v1/auth/login", map[string]any{"account": username, "password": next, "captchaId": testCaptcha(t, ctx, captcha, rdb), "captchaCode": "123456"}, "")
-	if normal.Code != http.StatusOK || normal.MustChange {
+	if normal.Code != http.StatusOK || normal.MustChange || normal.RefreshToken == "" {
 		t.Fatalf("normal login: %+v", normal)
+	}
+	refreshed := postJSON(t, router, "/api/v1/auth/refresh", map[string]any{"refreshToken": normal.RefreshToken}, "")
+	if refreshed.Code != http.StatusOK || refreshed.Token == "" || refreshed.RefreshToken == "" || refreshed.RefreshToken == normal.RefreshToken {
+		t.Fatalf("admin refresh: %+v", refreshed)
+	}
+	oldRefresh := postJSON(t, router, "/api/v1/auth/refresh", map[string]any{"refreshToken": normal.RefreshToken}, "")
+	if oldRefresh.Code != http.StatusUnauthorized {
+		t.Fatalf("old admin refresh token: %+v", oldRefresh)
 	}
 	if code, err := login.ResetPassword(ctx, userID, initial); err != nil || code != "" {
 		t.Fatalf("admin reset: code=%s err=%v", code, err)
@@ -113,10 +123,138 @@ func TestPasswordLifecycleWithMySQLAndRedis(t *testing.T) {
 	}
 }
 
+// TestCreatorRefreshTokenWithMySQLAndRedis 覆盖创作者账号 org_id 为空时的刷新和轮换行为。
+func TestCreatorRefreshTokenWithMySQLAndRedis(t *testing.T) {
+	if os.Getenv("XINGYANSHU_RUN_DB_TESTS") != "1" {
+		t.Skip("set XINGYANSHU_RUN_DB_TESTS=1 to run creator refresh integration test")
+	}
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(filepath.Join(root, "..", "..", "..", "config", "test.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := database.OpenMySQLConfig(cfg.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rdb, err := cache.OpenRedis(context.Background(), cfg.Redis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rdb.Close() })
+	if _, err := bootstrap.Run(context.Background(), db, cfg.Bootstrap); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	creatorService := creators.NewService(db, rdb, cfg.Auth, "test")
+	login := identity.NewLoginService(db, identity.NewCaptchaService(rdb), rdb, cfg.Auth, cfg.App.Environment)
+	router := gin.New()
+	identity.RegisterUnifiedRoutes(router.Group("/api/v1"), db, cfg.Auth, login)
+	userID := idgen.Next()
+	mobile := fmt.Sprintf("139%08d", userID%100000000)
+	if _, code, err := creatorService.SendSMS(ctx, mobile); err != nil || code != "" {
+		t.Fatalf("send creator registration sms: code=%s err=%v", code, err)
+	}
+	registered, code, err := creatorService.Register(ctx, creators.RegisterRequest{Mobile: mobile, Password: "Aa@123456", SMSCode: "123456", DisplayName: "刷新令牌测试创作者"}, "127.0.0.1")
+	if err != nil || code != "" {
+		t.Fatalf("register creator: code=%s err=%v", code, err)
+	}
+	creator, ok := registered["creator"].(map[string]any)
+	if !ok {
+		t.Fatalf("creator response missing: %+v", registered)
+	}
+	creatorID, err := strconv.ParseUint(creator["id"].(string), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accessToken, ok := registered["accessToken"].(string)
+	if !ok || accessToken == "" {
+		t.Fatalf("creator access token missing: %+v", registered)
+	}
+	meRequest := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+	meRequest.Header.Set("Authorization", "Bearer "+accessToken)
+	meResponse := httptest.NewRecorder()
+	router.ServeHTTP(meResponse, meRequest)
+	if meResponse.Code != http.StatusOK {
+		t.Fatalf("creator auth/me status=%d body=%s", meResponse.Code, meResponse.Body.String())
+	}
+	var meEnvelope struct {
+		Data struct {
+			ClientType string `json:"clientType"`
+			Roles      []struct {
+				Code string `json:"code"`
+			} `json:"roles"`
+			Menus []struct {
+				Code string `json:"code"`
+			} `json:"menus"`
+			Permissions []string `json:"permissions"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(meResponse.Body.Bytes(), &meEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if meEnvelope.Data.ClientType != "CREATOR_WEB" || len(meEnvelope.Data.Roles) != 1 || meEnvelope.Data.Roles[0].Code != "CREATOR" {
+		t.Fatalf("creator auth/me roles: %+v", meEnvelope.Data)
+	}
+	wantMenus := map[string]bool{"MENU_CREATOR_WORKSPACE": false, "MENU_CREATOR_ONBOARDING": false, "MENU_CREATOR_IP_MALL": false}
+	for _, menu := range meEnvelope.Data.Menus {
+		if _, exists := wantMenus[menu.Code]; !exists {
+			t.Fatalf("creator auth/me exposed unimplemented menu %s", menu.Code)
+		}
+		wantMenus[menu.Code] = true
+	}
+	for code, found := range wantMenus {
+		if !found {
+			t.Fatalf("creator auth/me missing menu %s: %+v", code, meEnvelope.Data.Menus)
+		}
+	}
+	wantPermissions := map[string]bool{"MENU_CREATOR_WORKSPACE": false, "MENU_CREATOR_ONBOARDING": false, "MENU_CREATOR_IP_MALL": false}
+	for _, permission := range meEnvelope.Data.Permissions {
+		if _, exists := wantPermissions[permission]; !exists {
+			t.Fatalf("creator auth/me exposed unimplemented permission %s", permission)
+		}
+		wantPermissions[permission] = true
+	}
+	for code, found := range wantPermissions {
+		if !found {
+			t.Fatalf("creator auth/me missing permission %s: %+v", code, meEnvelope.Data.Permissions)
+		}
+	}
+	t.Cleanup(func() {
+		db.Exec("DELETE FROM auth_session WHERE subject_type='CREATOR' AND subject_id=(SELECT user_id FROM creator_profile WHERE id=?)", creatorID)
+		db.Exec("DELETE FROM sys_user_role WHERE user_id=(SELECT user_id FROM creator_profile WHERE id=?)", creatorID)
+		db.Exec("DELETE FROM creator_profile WHERE id=?", creatorID)
+		db.Exec("DELETE FROM sys_user WHERE mobile=?", mobile)
+	})
+	first, ok := registered["refreshToken"].(string)
+	if !ok || first == "" {
+		t.Fatalf("first creator refresh token missing: %+v", registered)
+	}
+	refreshed, code, err := login.Refresh(ctx, identity.RefreshRequest{RefreshToken: first})
+	if err != nil || code != "" {
+		t.Fatalf("first creator refresh: code=%s err=%v", code, err)
+	}
+	second, ok := refreshed["refreshToken"].(string)
+	if !ok || second == "" || second == first {
+		t.Fatalf("rotated refresh token invalid: %+v", refreshed)
+	}
+	if _, code, err := login.Refresh(ctx, identity.RefreshRequest{RefreshToken: first}); err != nil || code != "AUTH_TOKEN_EXPIRED" {
+		t.Fatalf("old creator refresh token must be rejected: code=%s err=%v", code, err)
+	}
+	if _, code, err := login.Refresh(ctx, identity.RefreshRequest{RefreshToken: second}); err != nil || code != "" {
+		t.Fatalf("rotated creator refresh token: code=%s err=%v", code, err)
+	}
+}
+
 type testResponse struct {
-	Code       int
-	Token      string
-	MustChange bool
+	Code         int
+	Token        string
+	RefreshToken string
+	MustChange   bool
 }
 
 func postJSON(t *testing.T, router http.Handler, path string, body map[string]any, token string) testResponse {
@@ -140,11 +278,12 @@ func request(t *testing.T, router http.Handler, method, path string, body map[st
 	var envelope struct {
 		Data struct {
 			AccessToken        string `json:"accessToken"`
+			RefreshToken       string `json:"refreshToken"`
 			MustChangePassword bool   `json:"mustChangePassword"`
 		} `json:"data"`
 	}
 	_ = json.Unmarshal(res.Body.Bytes(), &envelope)
-	return testResponse{Code: res.Code, Token: envelope.Data.AccessToken, MustChange: envelope.Data.MustChangePassword}
+	return testResponse{Code: res.Code, Token: envelope.Data.AccessToken, RefreshToken: envelope.Data.RefreshToken, MustChange: envelope.Data.MustChangePassword}
 }
 
 func testCaptcha(t *testing.T, ctx context.Context, captcha *identity.CaptchaService, rdb *redis.Client) string {

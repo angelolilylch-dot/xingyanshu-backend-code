@@ -6,6 +6,11 @@ app:
   worker:
     poll_interval: 5s
 
+logging:
+  directory: logs/test
+  retention_days: 30
+  also_stdout: true
+
 database:
   driver: mysql
   host: 127.0.0.1
@@ -28,6 +33,14 @@ cors:
   allowed_origins:
     - "*"
 
+content_safety:
+  provider: tencent_tms
+  region: ap-guangzhou
+  biz_type: ip_center
+  secret_id:${XINGYANSHU_REDACTED_SECRET_ID}
+  secret_key:${XINGYANSHU_REDACTED_SECRET_KEY}
+  timeout: 10s
+
 evidence:
   provider: mock
   callback_secret: xingyanshu_test_evidence_callback_secret
@@ -38,8 +51,8 @@ file:
     key_prefix: xingyanshu/test
     cos:
       bucket_url: https://testxingyanshu1-1331209793.cos.ap-guangzhou.myqcloud.com
-      secret_id: ${XINGYANSHU_REDACTED_SECRET_ID}
-      secret_key: ${XINGYANSHU_REDACTED_SECRET_KEY}
+      secret_id:${XINGYANSHU_REDACTED_SECRET_ID}
+      secret_key:${XINGYANSHU_REDACTED_SECRET_KEY}
   signed_url_ttl: 10m
   watch_interval: 2s
   policy:

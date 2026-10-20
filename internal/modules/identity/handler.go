@@ -140,7 +140,7 @@ func RegisterAccountRoutes(group *gin.RouterGroup, accounts *AccountService, log
 			return
 		}
 		if code == "RESOURCE_NOT_FOUND" {
-			httpx.AbortWithError(c, httpx.NewError(http.StatusNotFound, code, "账号不存在或已停用"))
+			httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, "ACCOUNT_NOT_FOUND", "账号不存在或已停用", map[string]any{"resourceType": "ACCOUNT", "field": "userId"}))
 			return
 		}
 		if code != "" {
@@ -312,7 +312,7 @@ func writeAccountServiceResponse(c *gin.Context, successStatus int, data map[str
 	case "":
 		httpx.Success(c, successStatus, data)
 	case "RESOURCE_NOT_FOUND":
-		httpx.AbortWithError(c, httpx.NewError(http.StatusNotFound, code, "后台账号不存在"))
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, "ACCOUNT_NOT_FOUND", "后台账号不存在", map[string]any{"resourceType": "ACCOUNT", "field": "userId"}))
 	case "VERSION_CONFLICT":
 		httpx.AbortWithError(c, httpx.NewError(http.StatusConflict, code, "账号已被其他操作修改，请刷新后重试"))
 	case "RESOURCE_CONFLICT":
@@ -333,7 +333,7 @@ func writeOrganizationServiceResponse(c *gin.Context, successStatus int, data ma
 	case "":
 		httpx.Success(c, successStatus, data)
 	case "RESOURCE_NOT_FOUND":
-		httpx.AbortWithError(c, httpx.NewError(http.StatusNotFound, code, "组织不存在"))
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, "ORGANIZATION_NOT_FOUND", "组织不存在", map[string]any{"resourceType": "ORGANIZATION", "field": "orgId"}))
 	case "VERSION_CONFLICT":
 		httpx.AbortWithError(c, httpx.NewError(http.StatusConflict, code, "组织已被其他操作修改，请刷新后重试"))
 	case "RESOURCE_CONFLICT":

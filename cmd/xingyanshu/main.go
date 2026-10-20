@@ -8,6 +8,7 @@ import (
 
 	"xingyanshu-backend/internal/app"
 	"xingyanshu-backend/internal/config"
+	"xingyanshu-backend/internal/platform/logx"
 )
 
 func main() {
@@ -16,6 +17,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
+	cleanupLogs, err := logx.Init(logx.Settings{
+		Directory: cfg.Logging.Directory, RetentionDays: cfg.Logging.RetentionDays,
+		AlsoStdout: cfg.Logging.AlsoStdout, Component: command,
+	})
+	if err != nil {
+		log.Fatalf("initialize logs: %v", err)
+	}
+	defer cleanupLogs()
 
 	switch command {
 	case "server":
@@ -30,6 +39,7 @@ func main() {
 		log.Fatalf("unsupported command: %s", command)
 	}
 	if err != nil {
+		logx.Errorf("command=%q stage=command.run error_type=%T error=%q", command, err, logx.Redact(err.Error()))
 		log.Fatalf("%s failed: %v", command, err)
 	}
 }

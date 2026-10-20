@@ -18,6 +18,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"xingyanshu-backend/internal/config"
+	"xingyanshu-backend/internal/modules/files"
 	"xingyanshu-backend/internal/platform/audit"
 	"xingyanshu-backend/internal/platform/idgen"
 )
@@ -73,6 +74,7 @@ type identityVerification struct {
 	Status            string    `gorm:"column:status"`
 	Version           uint32    `gorm:"column:version"`
 	SubjectType       string    `gorm:"column:subject_type"`
+	LegalName         string    `gorm:"column:legal_name"`
 	VerificationNo    string    `gorm:"column:verification_no"`
 	CredentialType    string    `gorm:"column:credential_type"`
 	CredentialCipher  []byte    `gorm:"column:credential_cipher"`
@@ -96,6 +98,18 @@ type authorizationLetter struct {
 }
 
 func (authorizationLetter) TableName() string { return "creator_authorization_letter" }
+
+// authorizationLetterDraft 是服务端自动生成的、尚待签署盖章的 Word 草稿，不等同于 authorizationLetter 留存件。
+type authorizationLetterDraft struct {
+	ID                     uint64 `gorm:"column:id;primaryKey"`
+	Status                 string `gorm:"column:status"`
+	Version                uint32 `gorm:"column:version"`
+	CreatorID              uint64 `gorm:"column:creator_id"`
+	IdentityVerificationID uint64 `gorm:"column:identity_verification_id"`
+	FileID                 uint64 `gorm:"column:file_id"`
+}
+
+func (authorizationLetterDraft) TableName() string { return "creator_authorization_letter_draft" }
 
 type session struct {
 	ID               uint64    `gorm:"column:id;primaryKey"`
@@ -236,13 +250,13 @@ func (s *Service) VerifyIdentity(ctx context.Context, current CurrentCreator, re
 	}
 	var profile creatorProfile
 	if err := s.db.WithContext(ctx).Where("id = ? AND user_id = ?", current.CreatorID, current.UserID).First(&profile).Error; err != nil {
-		return nil, "RESOURCE_NOT_FOUND", nil
+		return nil, "CREATOR_NOT_FOUND", nil
 	}
 	if profile.IdentityStatus == "VERIFIED" {
 		return nil, "IDENTITY_ALREADY_VERIFIED", nil
 	}
 	credentialHash := sha256.Sum256([]byte(request.SubjectType + ":" + request.CredentialNo))
-	item := identityVerification{ID: idgen.Next(), CreatorID: profile.ID, Status: "ACTIVE", Version: 1, SubjectType: request.SubjectType, VerificationNo: fmt.Sprintf("IDV-%d", idgen.Next()), CredentialType: request.CredentialType, CredentialCipher: []byte(request.CredentialNo), CredentialHash: hex.EncodeToString(credentialHash[:]), ProviderCode: "MOCK", ProviderRequestNo: fmt.Sprintf("MOCK-IDV-%d", time.Now().UnixNano()), ResultStatus: "VERIFIED", ResultSummary: "Mock 实名核验通过"}
+	item := identityVerification{ID: idgen.Next(), CreatorID: profile.ID, Status: "ACTIVE", Version: 1, SubjectType: request.SubjectType, LegalName: request.LegalName, VerificationNo: fmt.Sprintf("IDV-%d", idgen.Next()), CredentialType: request.CredentialType, CredentialCipher: []byte(request.CredentialNo), CredentialHash: hex.EncodeToString(credentialHash[:]), ProviderCode: "MOCK", ProviderRequestNo: fmt.Sprintf("MOCK-IDV-%d", time.Now().UnixNano()), ResultStatus: "VERIFIED", ResultSummary: "Mock 实名核验通过"}
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", profile.ID).First(&profile).Error; err != nil {
 			return err
@@ -280,18 +294,129 @@ func (s *Service) LatestIdentity(ctx context.Context, current CurrentCreator) (m
 	return verificationResponse(item), "", nil
 }
 
+// GenerateAuthorizationLetterDraft 在企业或工作室实名通过后生成或复用私有 Word 草稿，并签发短期下载链接。
+func (s *Service) GenerateAuthorizationLetterDraft(ctx context.Context, current CurrentCreator, fileService *files.Service, clientIP string) (map[string]any, string, error) {
+	if fileService == nil {
+		return nil, "INTERNAL_ERROR", fmt.Errorf("file service unavailable")
+	}
+	var profile creatorProfile
+	if err := s.db.WithContext(ctx).Where("id=? AND user_id=? AND status='ACTIVE'", current.CreatorID, current.UserID).First(&profile).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, "CREATOR_NOT_FOUND", nil
+		}
+		return nil, "INTERNAL_ERROR", err
+	}
+	if profile.SubjectType == "PERSONAL" || profile.IdentityStatus != "VERIFIED" {
+		return map[string]any{"currentStatus": profile.IdentityStatus, "action": "GENERATE_AUTHORIZATION_LETTER_DRAFT", "reasonCode": "CREATOR_SUBJECT_NOT_ELIGIBLE"}, "STATE_TRANSITION_NOT_ALLOWED", nil
+	}
+	var verification identityVerification
+	if err := s.db.WithContext(ctx).Where("creator_id=? AND result_status='VERIFIED'", profile.ID).Order("created_at DESC").First(&verification).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, "IDENTITY_VERIFICATION_NOT_FOUND", nil
+		}
+		return nil, "INTERNAL_ERROR", err
+	}
+	var existing authorizationLetterDraft
+	if err := s.db.WithContext(ctx).Where("creator_id=? AND status='ACTIVE'", profile.ID).First(&existing).Error; err == nil {
+		return draftDownloadResponse(ctx, fileService, current, clientIP, existing.FileID)
+	} else if err != gorm.ErrRecordNotFound {
+		return nil, "INTERNAL_ERROR", err
+	}
+
+	content, err := buildAuthorizationLetterDOCX(authorizationLetterDraftContent{
+		LegalName:     verificationLegalName(verification, profile),
+		CredentialNo:  string(verification.CredentialCipher),
+		SubjectType:   profile.SubjectType,
+		GeneratedDate: time.Now(),
+	})
+	if err != nil {
+		return nil, "INTERNAL_ERROR", err
+	}
+	name := fmt.Sprintf("创作者主体授权委托书草稿-%s.docx", safeDraftFilename(verificationLegalName(verification, profile)))
+	file, code, err := fileService.CreateGeneratedForCreator(ctx, current.UserID, clientIP, name, authorizationLetterDOCXContentType, content)
+	if err != nil || code != "" {
+		return nil, code, err
+	}
+	fileID, parseErr := parseResponseID(file, "id")
+	if parseErr != nil {
+		return nil, "INTERNAL_ERROR", parseErr
+	}
+	draft := authorizationLetterDraft{ID: idgen.Next(), Status: "ACTIVE", Version: 1, CreatorID: profile.ID, IdentityVerificationID: verification.ID, FileID: fileID}
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&draft).Error; err != nil {
+			return err
+		}
+		return audit.WriteLog(tx, "CREATOR_AUTHORIZATION_LETTER_DRAFT_GENERATED", "CREATOR", profile.ID, nil, map[string]any{"draftId": fmt.Sprint(draft.ID), "fileId": fmt.Sprint(fileID)}, "SUCCESS", audit.Operator{Type: "USER", ID: current.UserID, RoleCode: creatorRoleCode, ClientIP: clientIP})
+	}); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "duplicate") {
+			var concurrent authorizationLetterDraft
+			if findErr := s.db.WithContext(ctx).Where("creator_id=? AND status='ACTIVE'", profile.ID).First(&concurrent).Error; findErr == nil {
+				return draftDownloadResponse(ctx, fileService, current, clientIP, concurrent.FileID)
+			}
+		}
+		return nil, "INTERNAL_ERROR", err
+	}
+	return draftDownloadResponse(ctx, fileService, current, clientIP, fileID)
+}
+
+func (s *Service) AuthorizationLetterDraft(ctx context.Context, current CurrentCreator, fileService *files.Service, clientIP string) (map[string]any, string, error) {
+	return s.GenerateAuthorizationLetterDraft(ctx, current, fileService, clientIP)
+}
+
+func draftDownloadResponse(ctx context.Context, fileService *files.Service, current CurrentCreator, clientIP string, fileID uint64) (map[string]any, string, error) {
+	download, code, err := fileService.CreateDownloadURLForCreator(ctx, current.UserID, clientIP, fileID)
+	if err != nil || code != "" {
+		return nil, code, err
+	}
+	return map[string]any{"authorizationLetterDraftFileId": download["fileId"], "fileName": "创作者主体授权委托书草稿.docx", "downloadUrl": download["downloadURL"], "expiresAt": download["expiresAt"]}, "", nil
+}
+
+func verificationLegalName(verification identityVerification, profile creatorProfile) string {
+	if strings.TrimSpace(verification.LegalName) != "" {
+		return strings.TrimSpace(verification.LegalName)
+	}
+	// 兼容升级前已完成的实名认证记录；新记录均使用 legal_name。
+	if strings.TrimSpace(profile.DisplayName) != "" {
+		return strings.TrimSpace(profile.DisplayName)
+	}
+	return "主体名称待补充"
+}
+
+func parseResponseID(value map[string]any, key string) (uint64, error) {
+	text, ok := value[key].(string)
+	if !ok {
+		return 0, fmt.Errorf("missing response id")
+	}
+	var id uint64
+	if _, err := fmt.Sscan(text, &id); err != nil || id == 0 {
+		return 0, fmt.Errorf("invalid response id")
+	}
+	return id, nil
+}
+
+func safeDraftFilename(value string) string {
+	value = strings.NewReplacer("/", "-", "\\", "-", ":", "-", "*", "-", "?", "-", "\"", "-", "<", "-", ">", "-", "|", "-").Replace(strings.TrimSpace(value))
+	if value == "" {
+		return "主体"
+	}
+	if len([]rune(value)) > 80 {
+		return string([]rune(value)[:80])
+	}
+	return value
+}
+
 // FileLetter 留存企业或工作室签署后的委托书。它不是认证和购买的前置条件。
 func (s *Service) FileLetter(ctx context.Context, current CurrentCreator, fileID uint64, clientIP string) (map[string]any, string, error) {
 	var profile creatorProfile
 	if err := s.db.WithContext(ctx).Where("id=? AND user_id=?", current.CreatorID, current.UserID).First(&profile).Error; err != nil {
-		return nil, "RESOURCE_NOT_FOUND", nil
+		return nil, "CREATOR_NOT_FOUND", nil
 	}
 	if profile.SubjectType == "PERSONAL" {
-		return nil, "STATE_TRANSITION_NOT_ALLOWED", nil
+		return map[string]any{"currentStatus": profile.SubjectType, "action": "FILE_AUTHORIZATION_LETTER", "reasonCode": "PERSONAL_SUBJECT_NOT_REQUIRED"}, "STATE_TRANSITION_NOT_ALLOWED", nil
 	}
 	var file struct{ ID uint64 }
 	if err := s.db.WithContext(ctx).Table("file_object").Select("id").Where("id=? AND created_by=? AND status='ACTIVE' AND upload_status='SUCCESS'", fileID, current.UserID).First(&file).Error; err != nil {
-		return nil, "RESOURCE_NOT_FOUND", nil
+		return nil, "AUTHORIZATION_LETTER_FILE_NOT_FOUND", nil
 	}
 	item := authorizationLetter{ID: idgen.Next(), CreatorID: profile.ID, Status: "ACTIVE", Version: 1, FileID: fileID}
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -319,7 +444,7 @@ func (s *Service) ChangeStatus(ctx context.Context, creatorID uint64, version ui
 	var profile creatorProfile
 	if err := s.db.WithContext(ctx).Where("id = ?", creatorID).First(&profile).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			return nil, "RESOURCE_NOT_FOUND", nil
+			return nil, "CREATOR_NOT_FOUND", nil
 		}
 		return nil, "INTERNAL_ERROR", err
 	}

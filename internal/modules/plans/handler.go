@@ -4,6 +4,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"net/http"
 	"strconv"
+	"strings"
 	"xingyanshu-backend/internal/modules/identity"
 	"xingyanshu-backend/internal/platform/httpx"
 )
@@ -153,7 +154,11 @@ func respond(c *gin.Context, status int, d map[string]any, code string, e error)
 		return
 	}
 	if code == "RESOURCE_NOT_FOUND" {
-		httpx.AbortWithError(c, httpx.NewError(http.StatusNotFound, code, "资源不存在或关联分账模板未启用"))
+		if strings.Contains(c.FullPath(), "distribution-templates") {
+			httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, "DISTRIBUTION_PLAN_NOT_FOUND", "分配方案不存在", map[string]any{"resourceType": "DISTRIBUTION_PLAN", "field": "templateId"}))
+		} else {
+			httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, "AUTH_PLAN_NOT_FOUND", "授权方案不存在", map[string]any{"resourceType": "AUTH_PLAN", "field": "planId"}))
+		}
 		return
 	}
 	if code == "VERSION_CONFLICT" {
@@ -161,7 +166,7 @@ func respond(c *gin.Context, status int, d map[string]any, code string, e error)
 		return
 	}
 	if code == "AUTH_PLAN_BOUND_LOCKED" || code == "STATE_TRANSITION_NOT_ALLOWED" {
-		httpx.AbortWithError(c, httpx.NewError(http.StatusUnprocessableEntity, code, "当前方案或模板状态不允许执行该操作"))
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusUnprocessableEntity, code, "当前方案或模板状态不允许执行该操作", d))
 		return
 	}
 	httpx.AbortWithError(c, httpx.NewError(http.StatusBadRequest, code, "方案字段不符合要求"))

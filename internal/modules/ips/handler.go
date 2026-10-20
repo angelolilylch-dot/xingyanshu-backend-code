@@ -76,6 +76,21 @@ func RegisterRoutes(group *gin.RouterGroup, service *Service, auth gin.HandlerFu
 			return service.Submit(c.Request.Context(), current, id, version, input, c.ClientIP())
 		})
 	})
+	city.POST("/ips/:ipId/dci-certificate", func(c *gin.Context) {
+		id, version, ok := ipIDVersion(c)
+		if !ok {
+			return
+		}
+		var input DCICertificateInput
+		raw, ok := bindIdempotentJSON(c, &input)
+		if !ok {
+			return
+		}
+		current, _ := identity.CurrentAdminFromContext(c)
+		executeIdempotent(c, current, service.db, raw, http.StatusOK, func() (map[string]any, string, error) {
+			return service.SubmitDCICertificate(c.Request.Context(), current, id, version, input, c.ClientIP())
+		})
+	})
 	city.POST("/ips/:ipId/dci-assistance-requests", func(c *gin.Context) {
 		id, version, ok := ipIDVersion(c)
 		if !ok {
@@ -125,6 +140,21 @@ func RegisterRoutes(group *gin.RouterGroup, service *Service, auth gin.HandlerFu
 		current, _ := identity.CurrentAdminFromContext(c)
 		executeIdempotent(c, current, service.db, raw, http.StatusOK, func() (map[string]any, string, error) {
 			return service.HandleDCIAssistance(c.Request.Context(), current, requestID, version, input, c.ClientIP())
+		})
+	})
+	compliance.POST("/compliance/dci-assistance-requests/:requestId/application-package", func(c *gin.Context) {
+		requestID, ok := assistanceID(c)
+		if !ok {
+			return
+		}
+		var input DCIPackageRequest
+		raw, ok := bindIdempotentJSON(c, &input)
+		if !ok {
+			return
+		}
+		current, _ := identity.CurrentAdminFromContext(c)
+		executeIdempotent(c, current, service.db, raw, http.StatusOK, func() (map[string]any, string, error) {
+			return service.CreateDCIAssistancePackage(c.Request.Context(), current, requestID, input, c.ClientIP())
 		})
 	})
 	compliance.POST("/ips/:ipId/dci-verifications", func(c *gin.Context) {
@@ -266,16 +296,18 @@ func executeIdempotent(c *gin.Context, current identity.CurrentAdmin, db *gorm.D
 
 func ipErrorStatus(code string) int {
 	switch code {
-	case "RESOURCE_NOT_FOUND":
+	case "RESOURCE_NOT_FOUND", "IP_NOT_FOUND", "COVER_FILE_NOT_FOUND", "RIGHT_DOCUMENT_FILE_NOT_FOUND", "DETAIL_FILE_NOT_FOUND", "DCI_CERTIFICATE_FILE_NOT_FOUND", "EVALUATION_REPORT_FILE_NOT_FOUND", "AUTH_PLAN_VERSION_NOT_FOUND", "DISTRIBUTION_PLAN_NOT_FOUND", "DCI_ASSISTANCE_REQUEST_NOT_FOUND", "MATERIAL_ITEM_FILE_NOT_FOUND":
 		return http.StatusNotFound
 	case "AUTH_FORBIDDEN":
 		return http.StatusForbidden
 	case "VERSION_CONFLICT":
 		return http.StatusConflict
-	case "STATE_TRANSITION_NOT_ALLOWED", "IP_DCI_CERTIFICATE_REQUIRED", "IP_LISTING_PREREQUISITE_MISSING", "CONTENT_DETECTION_REJECTED", "CONTENT_DETECTION_UNAVAILABLE":
+	case "STATE_TRANSITION_NOT_ALLOWED", "IP_DCI_CERTIFICATE_REQUIRED", "IP_LISTING_PREREQUISITE_MISSING", "CONTENT_DETECTION_REJECTED", "CONTENT_DETECTION_UNAVAILABLE", "DCI_PACKAGE_SOURCE_MISSING", "MATERIAL_PACK_REQUIRED", "MATERIAL_PACK_LOCKED":
 		return http.StatusUnprocessableEntity
-	case "EXTERNAL_SERVICE_UNAVAILABLE", "EVIDENCE_UNAVAILABLE", "EVIDENCE_NOT_CONFIRMED":
+	case "EXTERNAL_SERVICE_UNAVAILABLE", "EVIDENCE_UNAVAILABLE", "EVIDENCE_NOT_CONFIRMED", "DCI_PACKAGE_STORAGE_FAILED":
 		return http.StatusBadGateway
+	case "IP_SUBMIT_FAILED":
+		return http.StatusInternalServerError
 	default:
 		return http.StatusBadRequest
 	}
@@ -306,6 +338,14 @@ func assistanceIDVersion(c *gin.Context) (uint64, uint32, bool) {
 	version, ok := httpx.MustParseIfMatchVersion(c)
 	return id, version, ok
 }
+func assistanceID(c *gin.Context) (uint64, bool) {
+	id, err := strconv.ParseUint(c.Param("requestId"), 10, 64)
+	if err != nil || id == 0 {
+		httpx.AbortWithError(c, httpx.NewValidationError("VALIDATION_FORMAT_INVALID", "DCI代办申请编号格式错误"))
+		return 0, false
+	}
+	return id, true
+}
 func respond(c *gin.Context, status int, data map[string]any, code string, err error) {
 	if err != nil {
 		httpx.AbortWithError(c, httpx.NewError(http.StatusInternalServerError, "INTERNAL_ERROR", "IP服务暂不可用"))
@@ -314,14 +354,39 @@ func respond(c *gin.Context, status int, data map[string]any, code string, err e
 	switch code {
 	case "":
 		httpx.Success(c, status, data)
-	case "RESOURCE_NOT_FOUND":
-		httpx.AbortWithError(c, httpx.NewError(http.StatusNotFound, code, "IP、文件或关联方案不存在"))
+	case "RESOURCE_NOT_FOUND", "IP_NOT_FOUND":
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, "IP_NOT_FOUND", "IP不存在", map[string]any{"resourceType": "IP", "field": "ipId"}))
+	case "COVER_FILE_NOT_FOUND":
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, code, "封面文件不存在或不可用", map[string]any{"resourceType": "FILE", "field": "coverFileId"}))
+	case "RIGHT_DOCUMENT_FILE_NOT_FOUND":
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, code, "权属文件不存在或不可用", map[string]any{"resourceType": "FILE", "field": "rightDocuments[].fileId"}))
+	case "DETAIL_FILE_NOT_FOUND":
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, code, "详情文件不存在或不可用", map[string]any{"resourceType": "FILE", "field": "detailFileIds[]"}))
+	case "DCI_CERTIFICATE_FILE_NOT_FOUND":
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, code, "DCI证书文件不存在或不可用", map[string]any{"resourceType": "FILE", "field": "dciCertificateFileId"}))
+	case "MATERIAL_ITEM_FILE_NOT_FOUND":
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, code, "素材包文件不存在或不可用", map[string]any{"resourceType": "FILE", "field": "materialPack.items[].fileId"}))
+	case "EVALUATION_REPORT_FILE_NOT_FOUND":
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, code, "评估报告文件不存在或不可用", map[string]any{"resourceType": "FILE", "field": "fileId"}))
+	case "AUTH_PLAN_VERSION_NOT_FOUND":
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, code, "授权方案版本不存在或未启用", map[string]any{"resourceType": "AUTH_PLAN_VERSION", "field": "authPlanVersionId"}))
+	case "DISTRIBUTION_PLAN_NOT_FOUND":
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, code, "分配方案不存在或未启用", map[string]any{"resourceType": "DISTRIBUTION_PLAN", "field": "distributionTemplateId"}))
+	case "DCI_ASSISTANCE_REQUEST_NOT_FOUND":
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, code, "DCI代办申请不存在", map[string]any{"resourceType": "DCI_ASSISTANCE_REQUEST", "field": "requestId"}))
 	case "AUTH_FORBIDDEN":
 		httpx.AbortWithError(c, httpx.NewError(http.StatusForbidden, code, "无权操作该城市IP"))
 	case "VERSION_CONFLICT":
 		httpx.AbortWithError(c, httpx.NewError(http.StatusConflict, code, "数据已更新，请刷新后重试"))
-	case "STATE_TRANSITION_NOT_ALLOWED", "IP_DCI_CERTIFICATE_REQUIRED", "IP_LISTING_PREREQUISITE_MISSING", "CONTENT_DETECTION_REJECTED", "CONTENT_DETECTION_UNAVAILABLE":
-		httpx.AbortWithError(c, httpx.NewError(http.StatusUnprocessableEntity, code, "当前IP不满足操作条件"))
+	case "STATE_TRANSITION_NOT_ALLOWED", "IP_DCI_CERTIFICATE_REQUIRED", "IP_LISTING_PREREQUISITE_MISSING", "CONTENT_DETECTION_REJECTED", "CONTENT_DETECTION_UNAVAILABLE", "DCI_PACKAGE_SOURCE_MISSING":
+		if data == nil {
+			data = map[string]any{"action": c.FullPath(), "reasonCode": code}
+		}
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusUnprocessableEntity, code, "当前IP不满足操作条件", data))
+	case "DCI_PACKAGE_STORAGE_FAILED":
+		httpx.AbortWithError(c, httpx.NewError(http.StatusBadGateway, code, "代办资料包暂时无法生成"))
+	case "IP_SUBMIT_FAILED":
+		httpx.AbortWithError(c, httpx.NewError(http.StatusInternalServerError, code, "提交审核失败，请稍后重试；如持续失败请联系管理员并提供请求ID"))
 	default:
 		httpx.AbortWithError(c, httpx.NewError(http.StatusBadRequest, code, "IP字段或分账比例不符合要求"))
 	}

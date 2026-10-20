@@ -43,6 +43,15 @@ type adminUser struct {
 	Status             string
 }
 
+// refreshUser 仅承载刷新令牌校验所需的统一账号字段。
+// 创作者账号的 org_id 可以为空，不能在此阶段复用后台专用的 adminUser 模型读取。
+type refreshUser struct {
+	ID     uint64
+	Status string
+}
+
+func (refreshUser) TableName() string { return "sys_user" }
+
 type adminRole struct {
 	RoleCode string `gorm:"column:role_code"`
 	RoleName string `gorm:"column:role_name"`
@@ -234,6 +243,11 @@ type RefreshRequest struct {
 
 // Refresh 校验旧刷新令牌并在事务内替换为新令牌。
 func (s *LoginService) Refresh(ctx context.Context, request RefreshRequest) (map[string]any, string, error) {
+	return s.refresh(ctx, request, "")
+}
+
+// refresh 轮换指定客户端的刷新令牌；普通后台入口不得借此刷新消费者会话。
+func (s *LoginService) refresh(ctx context.Context, request RefreshRequest, requiredClientType string) (map[string]any, string, error) {
 	id, ok := parseRefreshToken(request.RefreshToken)
 	if !ok {
 		return nil, "AUTH_TOKEN_EXPIRED", nil
@@ -244,11 +258,10 @@ func (s *LoginService) Refresh(ctx context.Context, request RefreshRequest) (map
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", id).First(&session).Error; err != nil || session.Status != "ACTIVE" || !session.ExpiresAt.After(time.Now()) {
 			return errInvalidRefresh
 		}
-		if bcrypt.CompareHashAndPassword([]byte(session.RefreshTokenHash), []byte(request.RefreshToken)) != nil {
+		if (requiredClientType != "" && session.ClientType != requiredClientType) || (requiredClientType == "" && session.ClientType == "CONSUMER_H5") {
 			return errInvalidRefresh
 		}
-		var user adminUser
-		if err := tx.Where("id = ? AND status = ?", session.SubjectID, "ACTIVE").First(&user).Error; err != nil {
+		if bcrypt.CompareHashAndPassword([]byte(session.RefreshTokenHash), []byte(request.RefreshToken)) != nil {
 			return errInvalidRefresh
 		}
 		next := formatRefreshToken(session.ID)
@@ -260,18 +273,34 @@ func (s *LoginService) Refresh(ctx context.Context, request RefreshRequest) (map
 		if err := tx.Model(&session).Updates(map[string]any{"refresh_token_hash": string(hash), "token_version": nextTokenVersion, "last_used_at": time.Now()}).Error; err != nil {
 			return err
 		}
-		if session.ClientType == "CREATOR_WEB" {
-			var profile struct {
-				ID             uint64
-				DisplayName    string `gorm:"column:display_name"`
-				IdentityStatus string `gorm:"column:identity_status"`
-			}
-			if err := tx.Table("creator_profile").Where("user_id = ? AND status = ?", user.ID, "ACTIVE").First(&profile).Error; err != nil {
+		if session.ClientType == "CONSUMER_H5" {
+			var consumer consumerAccount
+			if err := tx.Where("id = ? AND status = ?", session.SubjectID, "ACTIVE").First(&consumer).Error; err != nil {
 				return errInvalidRefresh
 			}
-			result, err = s.creatorTokens(user, profile.ID, profile.DisplayName, profile.IdentityStatus, session.ID, nextTokenVersion, next)
+			result, err = s.consumerTokens(consumer, session.ID, nextTokenVersion, next)
 		} else {
-			result, err = s.tokens(user, session.ID, nextTokenVersion, next)
+			var subject refreshUser
+			if err := tx.Select("id", "status").Where("id = ? AND status = ?", session.SubjectID, "ACTIVE").First(&subject).Error; err != nil {
+				return errInvalidRefresh
+			}
+			if session.ClientType == "CREATOR_WEB" {
+				var profile struct {
+					ID             uint64
+					DisplayName    string `gorm:"column:display_name"`
+					IdentityStatus string `gorm:"column:identity_status"`
+				}
+				if err := tx.Table("creator_profile").Where("user_id = ? AND status = ?", subject.ID, "ACTIVE").First(&profile).Error; err != nil {
+					return errInvalidRefresh
+				}
+				result, err = s.creatorTokens(adminUser{ID: subject.ID}, profile.ID, profile.DisplayName, profile.IdentityStatus, session.ID, nextTokenVersion, next)
+			} else {
+				var user adminUser
+				if err := tx.Where("id = ? AND status = ?", subject.ID, "ACTIVE").First(&user).Error; err != nil {
+					return errInvalidRefresh
+				}
+				result, err = s.tokens(user, session.ID, nextTokenVersion, next)
+			}
 		}
 		return err
 	})
@@ -354,6 +383,68 @@ func (s *LoginService) Me(ctx context.Context, current CurrentAdmin) (map[string
 			"orgId":         fmt.Sprint(user.OrgID),
 			"dataScope":     user.DataScope,
 			"dataScopeName": scopeName(user.DataScope),
+		},
+		"roles":       roleItems,
+		"menus":       menuItems,
+		"permissions": permissionCodes,
+	}, nil
+}
+
+// CreatorMe 汇总创作者登录态。菜单只返回当前已完成并可联调的 C01/C02，避免前端展示尚未开发的后续业务。
+func (s *LoginService) CreatorMe(ctx context.Context, userID uint64) (map[string]any, error) {
+	var profile struct {
+		CreatorID      uint64 `gorm:"column:creator_id"`
+		DisplayName    string `gorm:"column:display_name"`
+		IdentityStatus string `gorm:"column:identity_status"`
+		Status         string
+	}
+	if err := s.db.WithContext(ctx).Table("creator_profile").
+		Select("id AS creator_id,display_name,identity_status,status").
+		Where("user_id=? AND status='ACTIVE'", userID).
+		Take(&profile).Error; err != nil {
+		return nil, err
+	}
+	var roles []adminRole
+	if err := s.db.WithContext(ctx).Table("sys_user_role AS ur").
+		Select("r.role_code, r.role_name").
+		Joins("JOIN sys_role AS r ON r.id = ur.role_id AND r.status = ?", "ACTIVE").
+		Where("ur.user_id = ?", userID).
+		Order("ur.is_primary DESC, r.id ASC").
+		Scan(&roles).Error; err != nil {
+		return nil, err
+	}
+	var permissions []adminPermission
+	if err := s.db.WithContext(ctx).Table("sys_user_role AS ur").
+		Select("DISTINCT p.permission_code, p.permission_name, p.permission_type, p.resource_code").
+		Joins("JOIN sys_role_permission AS rp ON rp.role_id = ur.role_id").
+		Joins("JOIN sys_permission AS p ON p.id = rp.permission_id AND p.status = ?", "ACTIVE").
+		Where("ur.user_id = ?", userID).
+		Order("p.permission_code ASC").
+		Scan(&permissions).Error; err != nil {
+		return nil, err
+	}
+	visibleMenuCodes := map[string]struct{}{
+		"MENU_CREATOR_WORKSPACE": {}, "MENU_CREATOR_ONBOARDING": {}, "MENU_CREATOR_IP_MALL": {},
+	}
+	roleItems := make([]map[string]string, 0, len(roles))
+	menuItems := make([]map[string]string, 0, len(visibleMenuCodes))
+	permissionCodes := make([]string, 0, len(visibleMenuCodes))
+	for _, role := range roles {
+		roleItems = append(roleItems, map[string]string{"code": role.RoleCode, "name": role.RoleName})
+	}
+	for _, permission := range permissions {
+		if _, ok := visibleMenuCodes[permission.PermissionCode]; !ok {
+			continue
+		}
+		permissionCodes = append(permissionCodes, permission.PermissionCode)
+		if permission.PermissionType == "MENU" {
+			menuItems = append(menuItems, map[string]string{"code": permission.PermissionCode, "name": permission.PermissionName, "resourceCode": permission.ResourceCode})
+		}
+	}
+	return map[string]any{
+		"clientType": "CREATOR_WEB",
+		"creator": map[string]any{
+			"id": fmt.Sprint(profile.CreatorID), "displayName": profile.DisplayName, "identityStatus": profile.IdentityStatus, "status": profile.Status,
 		},
 		"roles":       roleItems,
 		"menus":       menuItems,

@@ -1,0 +1,32 @@
+ALTER TABLE `auth_order`
+  ADD COLUMN `currency` CHAR(3) NOT NULL DEFAULT 'CNY' COMMENT '订单币种' AFTER `amount`,
+  ADD COLUMN `buyer_display_name` VARCHAR(128) NULL DEFAULT NULL COMMENT '购买方展示名快照' AFTER `contract_agreed`,
+  ADD COLUMN `buyer_subject_type` VARCHAR(40) NULL DEFAULT NULL COMMENT '购买方主体类型快照' AFTER `buyer_display_name`,
+  ADD COLUMN `buyer_legal_name` VARCHAR(128) NULL DEFAULT NULL COMMENT '购买方实名主体名称快照；合同使用' AFTER `buyer_subject_type`,
+  ADD COLUMN `buyer_credential_type` VARCHAR(40) NULL DEFAULT NULL COMMENT '购买方证件类型快照' AFTER `buyer_legal_name`,
+  ADD COLUMN `buyer_credential_masked` VARCHAR(128) NULL DEFAULT NULL COMMENT '购买方证件号脱敏快照' AFTER `buyer_credential_type`,
+  ADD COLUMN `ip_no_snapshot` VARCHAR(64) NULL DEFAULT NULL COMMENT 'IP编号快照' AFTER `buyer_credential_masked`,
+  ADD COLUMN `ip_name_snapshot` VARCHAR(200) NULL DEFAULT NULL COMMENT 'IP名称快照' AFTER `ip_no_snapshot`,
+  ADD COLUMN `plan_name_snapshot` VARCHAR(200) NULL DEFAULT NULL COMMENT '授权方案名称快照' AFTER `ip_name_snapshot`,
+  ADD COLUMN `authorization_mode_snapshot` VARCHAR(40) NULL DEFAULT NULL COMMENT '授权方式快照' AFTER `plan_name_snapshot`,
+  ADD COLUMN `term_type_snapshot` VARCHAR(40) NULL DEFAULT NULL COMMENT '授权期限类型快照' AFTER `authorization_mode_snapshot`,
+  ADD COLUMN `term_value_snapshot` INT NULL DEFAULT NULL COMMENT '授权期限值快照' AFTER `term_type_snapshot`,
+  ADD COLUMN `region_mode_snapshot` VARCHAR(40) NULL DEFAULT NULL COMMENT '授权地区模式快照' AFTER `term_value_snapshot`,
+  ADD COLUMN `content_type_snapshot` VARCHAR(40) NULL DEFAULT NULL COMMENT '授权内容类型快照' AFTER `region_mode_snapshot`,
+  ADD COLUMN `commercial_allowed_snapshot` TINYINT(1) NULL DEFAULT NULL COMMENT '允许商业化快照' AFTER `content_type_snapshot`,
+  ADD COLUMN `derivative_allowed_snapshot` TINYINT(1) NULL DEFAULT NULL COMMENT '允许二创快照' AFTER `commercial_allowed_snapshot`,
+  ADD COLUMN `n_creation_allowed_snapshot` TINYINT(1) NULL DEFAULT NULL COMMENT '允许N创快照' AFTER `derivative_allowed_snapshot`,
+  ADD COLUMN `payment_no` VARCHAR(64) NULL DEFAULT NULL COMMENT '成功支付流水号' AFTER `purchase_snapshot`,
+  ADD COLUMN `paid_at` DATETIME(3) NULL DEFAULT NULL COMMENT '支付成功时间' AFTER `payment_no`,
+  ADD COLUMN `contract_status` VARCHAR(40) NOT NULL DEFAULT 'NOT_GENERATED' COMMENT 'NOT_GENERATED/PENDING_GENERATION/GENERATED/GENERATION_FAILED' AFTER `paid_at`,
+  ADD COLUMN `evidence_status` VARCHAR(40) NOT NULL DEFAULT 'NOT_SUBMITTED' COMMENT 'NOT_SUBMITTED/PENDING_EVIDENCE/EVIDENCED/EVIDENCE_RETRYING/EVIDENCE_FAILED' AFTER `contract_status`,
+  ADD UNIQUE KEY `uk_auth_order_payment_no` (`payment_no`);
+
+ALTER TABLE `auth_contract`
+  ADD COLUMN `evidence_id` BIGINT UNSIGNED NULL DEFAULT NULL COMMENT '合同存证记录' AFTER `evidence_status`,
+  ADD COLUMN `evidence_receipt_no` VARCHAR(256) NULL DEFAULT NULL COMMENT '存证回执号' AFTER `evidence_id`,
+  ADD COLUMN `evidence_transaction_hash` VARCHAR(256) NULL DEFAULT NULL COMMENT '链上交易或存证哈希' AFTER `evidence_receipt_no`,
+  ADD COLUMN `evidence_retry_count` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '存证失败重试次数' AFTER `evidence_transaction_hash`,
+  ADD COLUMN `evidence_next_retry_at` DATETIME(3) NULL DEFAULT NULL COMMENT '下次存证重试时间' AFTER `evidence_retry_count`,
+  ADD COLUMN `evidence_last_error` VARCHAR(500) NULL DEFAULT NULL COMMENT '最近一次存证失败摘要' AFTER `evidence_next_retry_at`,
+  ADD KEY `idx_auth_contract_evidence_retry` (`evidence_status`, `evidence_next_retry_at`);

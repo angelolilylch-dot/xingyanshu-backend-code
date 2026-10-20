@@ -6,6 +6,8 @@ import (
 	"os"
 	"sync/atomic"
 	"time"
+
+	"xingyanshu-backend/internal/platform/logx"
 )
 
 // FilePolicyProvider 保存当前生效的上传策略，并在配置文件变化后原子替换。
@@ -38,6 +40,7 @@ func WatchFilePolicy(ctx context.Context, path string, interval time.Duration, p
 				}
 				cfg, err := Load(path)
 				if err != nil {
+					logx.Errorf("module=config action=file_policy_reload stage=config.load error_type=%T error=%q", err, logx.Redact(err.Error()))
 					log.Printf("file policy reload failed: %v; keeping previous policy", err)
 					continue
 				}

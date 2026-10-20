@@ -3,6 +3,7 @@ package foundation
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -10,10 +11,16 @@ import (
 	"xingyanshu-backend/internal/platform/httpx"
 )
 
-// RegisterPublicRoutes 注册无需登录的地区主数据接口。
+// RegisterPublicRoutes 注册无需登录的只读主数据接口。固定白名单字典只包含前端展示所需枚举，
+// 不包含后台控制项，因此创作者、消费者和未登录页面均可读取启用项。
 func RegisterPublicRoutes(group *gin.RouterGroup, service *Service) {
 	group.GET("/public/regions", func(c *gin.Context) {
 		data, code, err := service.ListRegions(c.Request.Context(), c.Query("keyword"), c.Query("level"), c.Query("parentCode"))
+		writeResponse(c, http.StatusOK, data, code, err)
+	})
+	group.GET("/dictionaries/:dictType", func(c *gin.Context) {
+		enabledOnly := c.DefaultQuery("enabledOnly", "true") != "false"
+		data, code, err := service.ListDictionary(c.Request.Context(), c.Param("dictType"), enabledOnly)
 		writeResponse(c, http.StatusOK, data, code, err)
 	})
 }
@@ -21,11 +28,6 @@ func RegisterPublicRoutes(group *gin.RouterGroup, service *Service) {
 // RegisterProtectedRoutes 注册字典查询和平台管理员维护接口。
 func RegisterProtectedRoutes(group *gin.RouterGroup, service *Service, middleware gin.HandlerFunc) {
 	protected := group.Group("", middleware)
-	protected.GET("/dictionaries/:dictType", func(c *gin.Context) {
-		enabledOnly := c.DefaultQuery("enabledOnly", "true") != "false"
-		data, code, err := service.ListDictionary(c.Request.Context(), c.Param("dictType"), enabledOnly)
-		writeResponse(c, http.StatusOK, data, code, err)
-	})
 	protected.GET("/tags", func(c *gin.Context) {
 		data, code, err := service.ListTags(c.Request.Context(), c.Query("tagType"), c.Query("keyword"), false)
 		writeResponse(c, http.StatusOK, data, code, err)
@@ -175,7 +177,18 @@ func writeResponse(c *gin.Context, successStatus int, data map[string]any, code 
 	case "":
 		httpx.Success(c, successStatus, data)
 	case "RESOURCE_NOT_FOUND":
-		httpx.AbortWithError(c, httpx.NewError(http.StatusNotFound, code, "资源不存在"))
+		path := c.FullPath()
+		resource, field, message := "FOUNDATION_RESOURCE", "id", "基础资源不存在"
+		if strings.Contains(path, "regions") {
+			resource, field, message = "REGION", "regionId", "地区不存在"
+		} else if strings.Contains(path, "tags") {
+			resource, field, message = "TAG", "tagId", "标签不存在"
+		} else if strings.Contains(path, "configs") {
+			resource, field, message = "SYSTEM_CONFIG", "configKey", "平台配置不存在"
+		} else if strings.Contains(path, "after-sale-templates") {
+			resource, field, message = "AFTER_SALE_TEMPLATE", "templateId", "售后模板不存在"
+		}
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, resource+"_NOT_FOUND", message, map[string]any{"resourceType": resource, "field": field}))
 	case "RESOURCE_CONFLICT", "VERSION_CONFLICT":
 		httpx.AbortWithError(c, httpx.NewError(http.StatusConflict, code, "数据已变更或重复，请刷新后重试"))
 	case "VALIDATION_FORMAT_INVALID":

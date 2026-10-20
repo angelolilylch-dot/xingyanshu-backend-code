@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS `auth_quota_reservation` (
+  `id` BIGINT UNSIGNED NOT NULL COMMENT '主键',
+  `reservation_no` VARCHAR(64) NOT NULL COMMENT '授权名额预占编号',
+  `auth_order_id` BIGINT UNSIGNED NOT NULL COMMENT '授权订单；一订单一预占',
+  `creator_id` BIGINT UNSIGNED NOT NULL COMMENT '创作者',
+  `ip_id` BIGINT UNSIGNED NOT NULL COMMENT 'IP资产',
+  `auth_plan_version_id` BIGINT UNSIGNED NOT NULL COMMENT '授权方案版本',
+  `quantity` INT UNSIGNED NOT NULL DEFAULT 1 COMMENT '预占数量；一期固定为1',
+  `reservation_status` VARCHAR(40) NOT NULL COMMENT '预占状态；RESERVED/RELEASED/CONSUMED',
+  `expires_at` DATETIME(3) NOT NULL COMMENT '预占过期时间',
+  `released_at` DATETIME(3) NULL DEFAULT NULL COMMENT '释放时间',
+  `release_reason` VARCHAR(64) NULL DEFAULT NULL COMMENT '释放原因',
+  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
+  `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '更新时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_auth_quota_reservation_no` (`reservation_no`),
+  UNIQUE KEY `uk_auth_quota_reservation_order_id` (`auth_order_id`),
+  KEY `idx_auth_quota_reservation_ip_status_expires` (`ip_id`, `reservation_status`, `expires_at`),
+  KEY `idx_auth_quota_reservation_creator_ip_status_expires` (`creator_id`, `ip_id`, `reservation_status`, `expires_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='授权名额预占；待支付订单有效期内锁定有限授权名额';

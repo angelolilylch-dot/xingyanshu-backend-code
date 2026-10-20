@@ -5,3 +5,4 @@ config/*.local.yaml
 .idea/
 bin/
 node_modules/
+xingyanshu.exe

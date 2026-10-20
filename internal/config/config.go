@@ -19,6 +19,7 @@ type Config struct {
 			PollInterval time.Duration `yaml:"poll_interval"`
 		} `yaml:"worker"`
 	} `yaml:"app"`
+	Logging       LoggingConfig       `yaml:"logging"`
 	Database      DatabaseConfig      `yaml:"database"`
 	Redis         RedisConfig         `yaml:"redis"`
 	Auth          AuthConfig          `yaml:"auth"`
@@ -27,6 +28,14 @@ type Config struct {
 	ContentSafety ContentSafetyConfig `yaml:"content_safety"`
 	Evidence      EvidenceConfig      `yaml:"evidence"`
 	Bootstrap     BootstrapConfig     `yaml:"bootstrap"`
+}
+
+// LoggingConfig controls local, plain-text operational logs. Credentials are
+// always redacted; detailed request/SQL diagnostics are test-only.
+type LoggingConfig struct {
+	Directory     string `yaml:"directory"`
+	RetentionDays int    `yaml:"retention_days"`
+	AlsoStdout    bool   `yaml:"also_stdout"`
 }
 
 type DatabaseConfig struct {
@@ -57,8 +66,8 @@ type CORSConfig struct {
 	AllowedOrigins []string `yaml:"allowed_origins"`
 }
 
-// ContentSafetyConfig 保存腾讯云文本内容安全连接信息。
-// 服务会同步审核用户提交的文本；密钥只允许置于本机私有配置或本机环境变量中。
+// ContentSafetyConfig 保存腾讯云内容安全连接信息。
+// 服务会同步审核用户提交文本；CNT-02 商品还审核关联图片。密钥只允许置于本机私有配置或本机环境变量中。
 type ContentSafetyConfig struct {
 	Provider  string        `yaml:"provider"`
 	Region    string        `yaml:"region"`
@@ -130,11 +139,22 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	expandEnvironment(&cfg)
+	cfg.Logging = normalizeLoggingConfig(cfg.Logging, cfg.App.Environment)
 	cfg.File = normalizeFileConfig(cfg.File)
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func normalizeLoggingConfig(value LoggingConfig, environment string) LoggingConfig {
+	if value.Directory == "" {
+		value.Directory = "logs/" + environment
+	}
+	if value.RetentionDays <= 0 {
+		value.RetentionDays = 90
+	}
+	return value
 }
 
 // expandEnvironment 允许本机环境变量填入第三方凭据，避免把密钥提交到配置模板。
@@ -192,6 +212,9 @@ func (c Config) Validate() error {
 	if c.App.Name == "" || c.App.Environment == "" || c.App.Server.Address == "" {
 		return fmt.Errorf("app.name, app.environment and app.server.address are required")
 	}
+	if (c.Logging.Directory == "") != (c.Logging.RetentionDays == 0) || c.Logging.RetentionDays < 0 {
+		return fmt.Errorf("logging.directory and logging.retention_days must be configured together")
+	}
 	if c.App.Worker.PollInterval <= 0 {
 		return fmt.Errorf("app.worker.poll_interval must be positive")
 	}
@@ -230,14 +253,17 @@ func (c Config) Validate() error {
 	if cos.BucketURL == "" || cos.SecretID == "" || cos.SecretKey == "" {
 		return fmt.Errorf("file.storage.cos bucket_url, secret_id and secret_key are required when provider is cos")
 	}
-	if c.ContentSafety.Provider != "" && c.ContentSafety.Provider != "tencent_tms" {
-		return fmt.Errorf("content_safety.provider must be tencent_tms when configured")
+	if c.ContentSafety.Provider != "" && c.ContentSafety.Provider != "tencent_tms" && c.ContentSafety.Provider != "mock" {
+		return fmt.Errorf("content_safety.provider must be tencent_tms or mock when configured")
 	}
 	if contentSafetyConfigured(c.ContentSafety) {
-		if c.ContentSafety.Provider != "tencent_tms" || c.ContentSafety.Region == "" || c.ContentSafety.BizType == "" || c.ContentSafety.SecretID == "" || c.ContentSafety.SecretKey == "" {
+		if c.ContentSafety.Provider == "mock" {
+			if c.App.Environment != "test" {
+				return fmt.Errorf("content_safety.provider mock is only allowed in test environment")
+			}
+		} else if c.ContentSafety.Provider != "tencent_tms" || c.ContentSafety.Region == "" || c.ContentSafety.BizType == "" || c.ContentSafety.SecretID == "" || c.ContentSafety.SecretKey == "" {
 			return fmt.Errorf("content_safety provider, region, biz_type, secret_id and secret_key are required when configured")
-		}
-		if c.ContentSafety.Timeout <= 0 {
+		} else if c.ContentSafety.Timeout <= 0 {
 			return fmt.Errorf("content_safety.timeout must be positive when configured")
 		}
 	}

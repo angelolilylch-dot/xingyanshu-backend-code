@@ -1,13 +1,19 @@
 package httpx
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"io"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"xingyanshu-backend/internal/platform/logx"
 )
 
 const maxRequestIDLength = 128
@@ -20,8 +26,36 @@ func RequestIDMiddleware() gin.HandlerFunc {
 			requestID = newRequestID()
 		}
 		c.Set(requestIDKey, requestID)
+		c.Request = c.Request.WithContext(logx.WithRequestID(c.Request.Context(), requestID))
 		c.Header("X-Request-Id", requestID)
 		c.Next()
+	}
+}
+
+// DiagnosticRequestMiddleware retains test-only API request bodies so errors
+// can be diagnosed without copying uploaded binary files into text logs.
+func DiagnosticRequestMiddleware(enabled bool) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if enabled && shouldCaptureBody(c.GetHeader("Content-Type")) && c.Request.Body != nil {
+			body, err := io.ReadAll(c.Request.Body)
+			if err != nil {
+				logx.Errorf("request_id=%q stage=http.read_request_body error_type=%T error=%q", RequestID(c), err, err)
+			} else {
+				c.Set("diagnostic_request_body", logx.Redact(string(body)))
+				c.Request.Body = io.NopCloser(bytes.NewReader(body))
+			}
+		}
+		c.Next()
+	}
+}
+
+// AccessLogMiddleware creates one concise access line per request. Query
+// strings are intentionally omitted because they can contain tokens.
+func AccessLogMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		started := time.Now()
+		c.Next()
+		logx.Accessf("request_id=%q method=%q path=%q status=%d latency_ms=%d", RequestID(c), c.Request.Method, c.Request.URL.Path, c.Writer.Status(), time.Since(started).Milliseconds())
 	}
 }
 
@@ -29,12 +63,18 @@ func RequestIDMiddleware() gin.HandlerFunc {
 func RecoveryMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {
-			if recover() != nil {
+			if recovered := recover(); recovered != nil {
+				logx.Errorf("request_id=%q stage=http.panic panic=%q stack=%q", RequestID(c), fmt.Sprint(recovered), string(debug.Stack()))
 				AbortWithError(c, NewError(http.StatusInternalServerError, "INTERNAL_ERROR", "服务暂时不可用"))
 			}
 		}()
 		c.Next()
 	}
+}
+
+func shouldCaptureBody(contentType string) bool {
+	contentType = strings.ToLower(contentType)
+	return strings.Contains(contentType, "application/json") || strings.Contains(contentType, "application/x-www-form-urlencoded") || strings.Contains(contentType, "text/")
 }
 
 func sanitizeRequestID(value string) string {

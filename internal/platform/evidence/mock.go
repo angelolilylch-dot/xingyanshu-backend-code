@@ -9,7 +9,7 @@ import (
 type MockProvider struct{}
 
 func (MockProvider) Submit(_ context.Context, request SubmitRequest) (SubmitResult, error) {
-	return SubmitResult{Provider: "MOCK_EVIDENCE", RequestNo: request.RequestNo, Status: "SUCCESS", ReceiptNo: fmt.Sprintf("MOCK-RCPT-%s", request.RequestNo)}, nil
+	return SubmitResult{Provider: "MOCK_EVIDENCE", RequestNo: request.RequestNo, Status: "SUCCESS", ReceiptNo: fmt.Sprintf("MOCK-RCPT-%s", request.RequestNo), TransactionHash: fmt.Sprintf("MOCK-TX-%s", request.RequestNo)}, nil
 }
 
 func (MockProvider) Query(_ context.Context, requestNo string) (SubmitResult, error) {

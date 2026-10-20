@@ -75,7 +75,7 @@ func writeResponse(c *gin.Context, status int, data map[string]any, code string,
 	case "":
 		httpx.Success(c, status, data)
 	case "RESOURCE_NOT_FOUND":
-		httpx.AbortWithError(c, httpx.NewError(http.StatusNotFound, code, "文件不存在或不可读取"))
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, "FILE_NOT_FOUND", "文件不存在或不可读取", map[string]any{"resourceType": "FILE", "field": "fileId"}))
 	case "AUTH_FORBIDDEN":
 		httpx.AbortWithError(c, httpx.NewError(http.StatusForbidden, code, "无权访问该文件"))
 	case "FILE_SIZE_EXCEEDED":

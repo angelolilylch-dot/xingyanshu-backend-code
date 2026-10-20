@@ -2,10 +2,13 @@
 package httpx
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"xingyanshu-backend/internal/platform/logx"
 )
 
 const requestIDKey = "request_id"
@@ -44,6 +47,11 @@ func NewError(status int, code, message string) *AppError {
 	return &AppError{Status: status, Code: code, Message: message}
 }
 
+// NewErrorWithData 供可安全暴露定位信息的业务错误使用。不得携带无权资源的真实标识。
+func NewErrorWithData(status int, code, message string, data any) *AppError {
+	return &AppError{Status: status, Code: code, Message: message, Data: data}
+}
+
 // NewValidationError 创建参数校验错误，供绑定器和业务字段校验共用。
 func NewValidationError(code, message string, fieldErrors ...FieldError) *AppError {
 	return &AppError{Status: http.StatusBadRequest, Code: code, Message: message, FieldErrors: fieldErrors}
@@ -61,6 +69,8 @@ func Error(c *gin.Context, appErr *AppError) {
 		status = http.StatusInternalServerError
 	}
 	c.JSON(status, Response{Code: appErr.Code, Message: appErr.Message, Data: appErr.Data, RequestID: RequestID(c), Timestamp: now(), FieldErrors: appErr.FieldErrors})
+	requestBody, _ := c.Get("diagnostic_request_body")
+	logx.Errorf("request_id=%q stage=http.response status=%d error_code=%q message=%q method=%q path=%q request_body=%q", RequestID(c), status, appErr.Code, appErr.Message, c.Request.Method, c.Request.URL.Path, fmt.Sprint(requestBody))
 }
 
 // AbortWithError 终止当前处理链并输出统一错误响应。

@@ -152,7 +152,7 @@ func (s *Service) HandleDCIAssistance(ctx context.Context, current identity.Curr
 		HandlingStatus string
 	}
 	if err := s.db.WithContext(ctx).Table("ip_dci_assistance_request").Where("id=?", requestID).Take(&request).Error; err != nil {
-		return nil, "RESOURCE_NOT_FOUND", nil
+		return nil, "DCI_ASSISTANCE_REQUEST_NOT_FOUND", nil
 	}
 	if request.Version != version {
 		return nil, "VERSION_CONFLICT", nil
@@ -245,16 +245,27 @@ func (s *Service) ReviewRights(ctx context.Context, current identity.CurrentAdmi
 	if s.evidence == nil {
 		return nil, "EVIDENCE_UNAVAILABLE", nil
 	}
+	materialEvidenceID, code, err := s.submitMaterialEvidence(ctx, ipID)
+	if code != "" {
+		return nil, code, err
+	}
 	evidenceID, code, err := s.evidence.Submit(ctx, evidence.SubmitRequest{ObjectType: "IP", ObjectID: ipID, EvidenceType: "IP_RIGHTS_CONFIRMATION", HashValue: hashValue})
 	if code != "" {
 		return nil, code, err
 	}
-	var evidenceRow struct{ Status, ReceiptNo string }
-	if err := s.db.WithContext(ctx).Table("evidence_record").Where("id=?", evidenceID).Take(&evidenceRow).Error; err != nil || evidenceRow.Status != "SUCCESS" || evidenceRow.ReceiptNo == "" {
+	var evidenceRow struct {
+		Status          string
+		ReceiptNo       string `gorm:"column:receipt_no"`
+		TransactionHash string `gorm:"column:chain_transaction_hash"`
+	}
+	if err := s.db.WithContext(ctx).Table("evidence_record").Where("id=?", evidenceID).Take(&evidenceRow).Error; err != nil || evidenceRow.Status != "SUCCESS" || evidenceRow.ReceiptNo == "" || evidenceRow.TransactionHash == "" {
 		return nil, "EVIDENCE_NOT_CONFIRMED", err
 	}
 	now := time.Now()
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := s.freezeMaterialPack(tx, ipID, now); err != nil {
+			return err
+		}
 		if err := s.saveConfirmedBinding(tx, ipID, current.UserID, input); err != nil {
 			return err
 		}
@@ -268,12 +279,12 @@ func (s *Service) ReviewRights(ctx context.Context, current identity.CurrentAdmi
 		if err := audit.WriteStatusHistory(tx, "IP", ipID, asset.Status, "LISTED", input.Comment, ipOperator(current, clientIP)); err != nil {
 			return err
 		}
-		return audit.WriteLog(tx, "IP_RIGHTS_CONFIRMED_AND_LISTED", "IP", ipID, nil, map[string]any{"evidenceId": fmt.Sprint(evidenceID), "status": "LISTED", "mallVisible": true}, "SUCCESS", ipOperator(current, clientIP))
+		return audit.WriteLog(tx, "IP_RIGHTS_CONFIRMED_AND_LISTED", "IP", ipID, nil, map[string]any{"evidenceId": fmt.Sprint(evidenceID), "materialEvidenceId": fmt.Sprint(materialEvidenceID), "status": "LISTED", "mallVisible": true}, "SUCCESS", ipOperator(current, clientIP))
 	})
 	if err != nil {
 		return nil, "RESOURCE_CONFLICT", err
 	}
-	return map[string]any{"id": fmt.Sprint(ipID), "status": "LISTED", "mallVisible": true, "suggestedTransactionPriceAmount": input.SuggestedTransactionPriceAmount, "version": version + 1, "evidenceId": fmt.Sprint(evidenceID), "evidenceReceiptNo": evidenceRow.ReceiptNo}, "", nil
+	return map[string]any{"id": fmt.Sprint(ipID), "status": "LISTED", "mallVisible": true, "suggestedTransactionPriceAmount": input.SuggestedTransactionPriceAmount, "version": version + 1, "evidenceId": fmt.Sprint(evidenceID), "evidenceReceiptNo": evidenceRow.ReceiptNo, "evidenceTransactionHash": evidenceRow.TransactionHash}, "", nil
 }
 
 // Pause 将已上架 IP 暂停销售，但不影响已经生效的历史授权。
@@ -289,7 +300,7 @@ func (s *Service) Pause(ctx context.Context, current identity.CurrentAdmin, ipID
 		Version uint32
 	}
 	if err := s.db.WithContext(ctx).Table("ip_asset").Where("id=?", ipID).Take(&asset).Error; err != nil {
-		return nil, "RESOURCE_NOT_FOUND", nil
+		return nil, "IP_NOT_FOUND", nil
 	}
 	if asset.Version != version {
 		return nil, "VERSION_CONFLICT", nil
@@ -343,7 +354,7 @@ func (s *Service) Resume(ctx context.Context, current identity.CurrentAdmin, ipI
 		CoverFileID           uint64 `gorm:"column:cover_file_id"`
 	}
 	if err := s.db.WithContext(ctx).Table("ip_asset").Where("id=?", ipID).Take(&asset).Error; err != nil {
-		return nil, "RESOURCE_NOT_FOUND", nil
+		return nil, "IP_NOT_FOUND", nil
 	}
 	if asset.Version != version {
 		return nil, "VERSION_CONFLICT", nil
@@ -404,7 +415,7 @@ func (s *Service) Delist(ctx context.Context, current identity.CurrentAdmin, ipI
 		Version uint32
 	}
 	if err := s.db.WithContext(ctx).Table("ip_asset").Where("id=?", ipID).Take(&asset).Error; err != nil {
-		return nil, "RESOURCE_NOT_FOUND", nil
+		return nil, "IP_NOT_FOUND", nil
 	}
 	if asset.Version != version {
 		return nil, "VERSION_CONFLICT", nil
@@ -456,7 +467,7 @@ func (s *Service) pendingComplianceAsset(ctx context.Context, current identity.C
 	}
 	var asset complianceAsset
 	if err := s.db.WithContext(ctx).Table("ip_asset").Where("id=?", ipID).Take(&asset).Error; err != nil {
-		return complianceAsset{}, "RESOURCE_NOT_FOUND"
+		return complianceAsset{}, "IP_NOT_FOUND"
 	}
 	if asset.Version != version {
 		return complianceAsset{}, "VERSION_CONFLICT"
@@ -531,7 +542,7 @@ func (s *Service) saveConfirmedBinding(tx *gorm.DB, ipID, userID uint64, input R
 func (s *Service) confirmationHash(ctx context.Context, ipID uint64, input RightsReviewRequest) (string, string, error) {
 	var asset map[string]any
 	if err := s.db.WithContext(ctx).Table("ip_asset").Where("id=?", ipID).Take(&asset).Error; err != nil {
-		return "", "RESOURCE_NOT_FOUND", nil
+		return "", "IP_NOT_FOUND", nil
 	}
 	var rightDocuments []map[string]any
 	if err := s.db.WithContext(ctx).Table("ip_right_document").Where("ip_id=?", ipID).Order("document_no").Find(&rightDocuments).Error; err != nil {

@@ -17,6 +17,7 @@ import (
 // Storage 只暴露文件服务需要的上传与临时读取能力，不让业务模块接触 COS 存储键。
 type Storage interface {
 	Put(ctx context.Context, key, contentType string, body io.Reader) error
+	Get(ctx context.Context, key string) (io.ReadCloser, error)
 	SignDownloadURL(ctx context.Context, key string, ttl time.Duration) (string, error)
 }
 
@@ -52,10 +53,37 @@ func (s *cosStorage) Put(ctx context.Context, key, contentType string, body io.R
 	return nil
 }
 
+// Get 仅供服务端聚合已有私有文件，例如生成代办资料包；不向 HTTP 调用方暴露对象存储键。
+func (s *cosStorage) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	response, err := s.client.Object.Get(ctx, key, nil)
+	if err != nil {
+		return nil, err
+	}
+	return response.Body, nil
+}
+
 func (s *cosStorage) SignDownloadURL(ctx context.Context, key string, ttl time.Duration) (string, error) {
 	value, err := s.client.Object.GetPresignedURL(ctx, http.MethodGet, key, s.secretID, s.secretKey, ttl, nil)
 	if err != nil {
 		return "", err
 	}
 	return value.String(), nil
+}
+
+func (s *cosStorage) SignUploadURL(ctx context.Context, key, contentType string, ttl time.Duration) (string, error) {
+	header := http.Header{"Content-Type": []string{contentType}}
+	value, err := s.client.Object.GetPresignedURL(ctx, http.MethodPut, key, s.secretID, s.secretKey, ttl, &cos.PresignedURLOptions{Header: &header})
+	if err != nil {
+		return "", err
+	}
+	return value.String(), nil
+}
+
+// Delete is intentionally optional to keep legacy storage test doubles compatible.
+func (s *cosStorage) Delete(ctx context.Context, key string) error {
+	response, err := s.client.Object.Delete(ctx, key)
+	if response != nil && response.Body != nil {
+		response.Body.Close()
+	}
+	return err
 }

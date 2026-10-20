@@ -8,6 +8,7 @@ import (
 
 	common "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
+	ims "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/ims/v20201229"
 	tms "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/tms/v20201229"
 
 	"xingyanshu-backend/internal/config"
@@ -15,8 +16,9 @@ import (
 
 // TencentTMSProvider 使用腾讯云 TextModeration 进行真实的同步文本审核。
 type TencentTMSProvider struct {
-	client  *tms.Client
-	bizType string
+	client      *tms.Client
+	imageClient *ims.Client
+	bizType     string
 }
 
 // NewTencentTMSProvider 校验完整配置并创建 SDK 客户端；缺少凭据时返回错误，绝不静默放行文本。
@@ -28,7 +30,32 @@ func NewTencentTMSProvider(cfg config.ContentSafetyConfig) (*TencentTMSProvider,
 	if err != nil {
 		return nil, fmt.Errorf("create Tencent TMS client: %w", err)
 	}
-	return &TencentTMSProvider{client: client, bizType: cfg.BizType}, nil
+	imageClient, err := ims.NewClient(common.NewCredential(cfg.SecretID, cfg.SecretKey), cfg.Region, profile.NewClientProfile())
+	if err != nil {
+		return nil, fmt.Errorf("create Tencent IMS client: %w", err)
+	}
+	return &TencentTMSProvider{client: client, imageClient: imageClient, bizType: cfg.BizType}, nil
+}
+
+// ModerateImage 使用同一份腾讯云内容安全策略审核商品图片。图片由私有 COS
+// 临时签名地址提供，避免业务代码下载大文件并突破 SDK Base64 请求体限制。
+func (p *TencentTMSProvider) ModerateImage(ctx context.Context, input ImageRequest) (Result, error) {
+	if strings.TrimSpace(input.URL) == "" {
+		return Result{}, fmt.Errorf("image URL is required")
+	}
+	request := ims.NewImageModerationRequest()
+	request.BizType = common.StringPtr(p.bizType)
+	request.DataId = common.StringPtr(input.DataID)
+	request.FileUrl = common.StringPtr(input.URL)
+	request.Type = common.StringPtr("IMAGE")
+	response, err := p.imageClient.ImageModerationWithContext(ctx, request)
+	if err != nil {
+		return Result{}, fmt.Errorf("Tencent IMS ImageModeration: %w", err)
+	}
+	if response == nil || response.Response == nil || response.Response.Suggestion == nil || response.Response.RequestId == nil {
+		return Result{}, fmt.Errorf("Tencent IMS returned incomplete response")
+	}
+	return Result{Provider: "TENCENT_IMS", ProviderRequestNo: deref(response.Response.RequestId), Decision: decisionFromSuggestion(deref(response.Response.Suggestion)), Label: deref(response.Response.Label), SubLabel: deref(response.Response.SubLabel), Score: derefInt(response.Response.Score)}, nil
 }
 
 // Moderate 将 UTF-8 文本编码为腾讯云规定的 Base64 后同步调用接口，并将处置建议映射为平台固定结论。

@@ -47,17 +47,12 @@ func RegisterUnifiedRoutes(group *gin.RouterGroup, db *gorm.DB, cfg config.AuthC
 			httpx.Success(c, http.StatusOK, data)
 			return
 		}
-		var row struct {
-			CreatorID      uint64 `gorm:"column:creator_id"`
-			DisplayName    string `gorm:"column:display_name"`
-			IdentityStatus string `gorm:"column:identity_status"`
-			Status         string
-		}
-		if err := db.WithContext(c.Request.Context()).Table("creator_profile").Select("id AS creator_id,display_name,identity_status,status").Where("user_id=? AND status='ACTIVE'", subject.UserID).Take(&row).Error; err != nil {
+		data, err := login.CreatorMe(c.Request.Context(), subject.UserID)
+		if err != nil {
 			rejectUnified(c)
 			return
 		}
-		httpx.Success(c, http.StatusOK, map[string]any{"clientType": "CREATOR_WEB", "creator": map[string]any{"id": fmt.Sprint(row.CreatorID), "displayName": row.DisplayName, "identityStatus": row.IdentityStatus, "status": row.Status}})
+		httpx.Success(c, http.StatusOK, data)
 	})
 }
 
