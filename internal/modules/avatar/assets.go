@@ -26,7 +26,7 @@ type uploadSigner interface {
 
 func (s *Service) assetCredentials(ctx context.Context, cur Current, idText string, r assetCredentialRequest) (any, *httpx.AppError) {
 	id, ok := parseUint(idText)
-	if !ok || !validSlot(r.AssetType, r.CaptureSlot) || len(r.ContentHash) != 64 || r.FileSize > 200*1024*1024 {
+	if !ok || !validAsset(r.AssetType, r.CaptureSlot, r.MIMEType, r.FileSize) || len(r.ContentHash) != 64 {
 		return nil, avatarError(400, "VALIDATION_FORMAT_INVALID", "素材参数不正确", nil)
 	}
 	var row struct {
@@ -69,6 +69,16 @@ func validSlot(t, slot string) bool {
 		return false
 	}
 	return slot[6] >= '1' && slot[6] <= '8'
+}
+
+func validAsset(assetType, slot, mimeType string, size int64) bool {
+	if !validSlot(assetType, slot) || size <= 0 {
+		return false
+	}
+	if assetType == "FACE_PHOTO" {
+		return mimeType == "image/jpeg" && size <= photoMaxFileSize
+	}
+	return (mimeType == "video/mp4" || mimeType == "video/webm") && size <= videoMaxFileSize
 }
 func (s *Service) confirmAsset(ctx context.Context, cur Current, idText string, r assetConfirmRequest) (any, *httpx.AppError) {
 	id, ok := parseUint(idText)
@@ -116,11 +126,26 @@ func (s *Service) submitCollection(ctx context.Context, cur Current, idText stri
 	if !ok {
 		return nil, avatarError(400, "VALIDATION_FORMAT_INVALID", "采集会话不正确", nil)
 	}
-	var counts struct{ Photos, Videos int64 }
-	q := s.db.WithContext(ctx).Table("avatar_asset a").Select("SUM(CASE WHEN asset_type='FACE_PHOTO' AND status='CONFIRMED' THEN 1 ELSE 0 END) photos,SUM(CASE WHEN asset_type='VOICE_VIDEO' AND status='CONFIRMED' THEN 1 ELSE 0 END) videos").Joins("JOIN avatar_collection_session cs ON cs.id=a.collection_session_id JOIN avatar_profile p ON p.id=cs.profile_id").Where("a.collection_session_id=? AND p.account_id=?", id, cur.AccountID)
-	q.Scan(&counts)
-	if counts.Photos != 8 || counts.Videos != 1 {
-		return nil, avatarError(422, "AVATAR_COLLECTION_INCOMPLETE", "请完成8张照片和朗读视频采集", gin.H{"photoCount": counts.Photos, "videoCount": counts.Videos})
+	var assets []struct{ AssetType, CaptureSlot string }
+	s.db.WithContext(ctx).Table("avatar_asset a").Select("a.asset_type,a.capture_slot").Joins("JOIN avatar_collection_session cs ON cs.id=a.collection_session_id JOIN avatar_profile p ON p.id=cs.profile_id").Where("a.collection_session_id=? AND p.account_id=? AND a.status='CONFIRMED'", id, cur.AccountID).Find(&assets)
+	confirmed := map[string]bool{}
+	var photos, videos int64
+	for _, asset := range assets {
+		confirmed[asset.CaptureSlot] = true
+		if asset.AssetType == "FACE_PHOTO" {
+			photos++
+		} else if asset.AssetType == "VOICE_VIDEO" {
+			videos++
+		}
+	}
+	missing := make([]string, 0)
+	for _, item := range requiredCaptureSlots {
+		if !confirmed[item["captureSlot"].(string)] {
+			missing = append(missing, item["captureSlot"].(string))
+		}
+	}
+	if len(missing) > 0 {
+		return nil, avatarError(422, "AVATAR_COLLECTION_INCOMPLETE", "请完成8张照片和朗读视频采集", gin.H{"photoCount": photos, "videoCount": videos, "missingSlots": missing})
 	}
 	var taskID uint64
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -136,7 +161,7 @@ func (s *Service) submitCollection(ctx context.Context, cur Current, idText stri
 		}
 		now := time.Now()
 		taskID = idgen.Next()
-		if e := tx.Table("avatar_processing_task").Create(map[string]any{"id": taskID, "status": "PENDING", "version": 1, "task_no": fmt.Sprintf("AVT-%d", taskID), "profile_id": row.ProfileID, "collection_session_id": id, "task_type": "AUTO_QUALITY", "input_digest": hash(fmt.Sprintf("%d:%d:%d", id, counts.Photos, counts.Videos)), "status_changed_at": now, "status_changed_by_type": "SYSTEM"}).Error; e != nil {
+		if e := tx.Table("avatar_processing_task").Create(map[string]any{"id": taskID, "status": "PENDING", "version": 1, "task_no": fmt.Sprintf("AVT-%d", taskID), "profile_id": row.ProfileID, "collection_session_id": id, "task_type": "AUTO_QUALITY", "input_digest": hash(fmt.Sprintf("%d:%d:%d", id, photos, videos)), "status_changed_at": now, "status_changed_by_type": "SYSTEM"}).Error; e != nil {
 			return e
 		}
 		if e := tx.Table("avatar_collection_session").Where("id=?", id).Updates(map[string]any{"status": "SUBMITTED", "submitted_at": now, "updated_at": now, "status_changed_at": now, "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(cur.AccountID)}).Error; e != nil {

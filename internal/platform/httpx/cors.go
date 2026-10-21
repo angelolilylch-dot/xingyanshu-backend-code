@@ -17,7 +17,7 @@ func CORSMiddleware(cfg config.CORSConfig) gin.HandlerFunc {
 	allowAllOrigins := len(cfg.AllowedOrigins) == 1 && cfg.AllowedOrigins[0] == "*"
 	options := cors.Config{
 		AllowMethods:     []string{"GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Authorization", "Content-Type", "X-Request-Id", "Idempotency-Key", "If-Match-Version"},
+		AllowHeaders:     []string{"Authorization", "Content-Type", "X-Request-Id", "X-Client", "Idempotency-Key", "If-Match-Version"},
 		ExposeHeaders:    []string{"X-Request-Id"},
 		AllowCredentials: false,
 		MaxAge:           12 * time.Hour,

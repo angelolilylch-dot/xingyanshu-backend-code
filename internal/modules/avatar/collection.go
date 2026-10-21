@@ -40,7 +40,7 @@ func (s *Service) startCollection(ctx context.Context, cur Current) (any, *httpx
 				Status string
 			}
 			if e := tx.Table("avatar_collection_session").Select("id,status").Where("id=? AND status IN ('DRAFT','COLLECTING')", *p.CurrentCollectionSessionID).Take(&active).Error; e == nil {
-				out = gin.H{"sessionId": fmt.Sprint(active.ID), "status": active.Status, "photoRequiredCount": 8, "videoRequired": true, "resumed": true}
+				out = gin.H{"sessionId": fmt.Sprint(active.ID), "status": active.Status, "photoRequiredCount": 8, "videoRequired": true, "requiredSlots": requiredSlotsResponse(), "resumed": true}
 				return nil
 			}
 		}
@@ -53,7 +53,7 @@ func (s *Service) startCollection(ctx context.Context, cur Current) (any, *httpx
 		if e := tx.Table("avatar_profile").Where("id=?", p.ID).Updates(map[string]any{"current_collection_session_id": id, "current_version_no": v, "status": "COLLECTING", "collection_status": "COLLECTING", "updated_at": now, "status_changed_at": now}).Error; e != nil {
 			return e
 		}
-		out = gin.H{"sessionId": fmt.Sprint(id), "status": "COLLECTING", "photoRequiredCount": 8, "videoRequired": true, "resumed": false}
+		out = gin.H{"sessionId": fmt.Sprint(id), "status": "COLLECTING", "photoRequiredCount": 8, "videoRequired": true, "requiredSlots": requiredSlotsResponse(), "resumed": false}
 		return nil
 	})
 	if err != nil {

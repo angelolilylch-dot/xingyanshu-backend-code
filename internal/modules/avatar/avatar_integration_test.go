@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,11 +28,29 @@ import (
 )
 
 // TestAvatarRegistrationHTTPWithMySQLRedis validates the AVATAR_H5 isolation
-// boundary using actual MySQL and Redis, including the three-factor match.
+// boundary using actual MySQL and Redis, including the H5 three-factor match.
+func TestCaptureRequirementValidation(t *testing.T) {
+	if len(requiredCaptureSlots) != 9 {
+		t.Fatalf("required slots=%d, want 9", len(requiredCaptureSlots))
+	}
+	if !validAsset("FACE_PHOTO", "FACE_01", "image/jpeg", photoMaxFileSize) || validAsset("FACE_PHOTO", "FACE_01", "image/png", 1) || validAsset("FACE_PHOTO", "FACE_01", "image/jpeg", photoMaxFileSize+1) {
+		t.Fatal("photo MIME or size restriction is not enforced")
+	}
+	if !validAsset("VOICE_VIDEO", "VOICE_VIDEO", "video/mp4", videoMaxFileSize) || !validAsset("VOICE_VIDEO", "VOICE_VIDEO", "video/webm", videoMaxFileSize) || validAsset("VOICE_VIDEO", "VOICE_VIDEO", "video/quicktime", 1) || validAsset("VOICE_VIDEO", "VOICE_VIDEO", "video/mp4", videoMaxFileSize+1) {
+		t.Fatal("video MIME or size restriction is not enforced")
+	}
+}
+
 func TestAvatarRegistrationHTTPWithMySQLRedis(t *testing.T) {
 	if os.Getenv("XINGYANSHU_RUN_DB_TESTS") != "1" {
 		t.Skip("set XINGYANSHU_RUN_DB_TESTS=1")
 	}
+	// This registration test uses MySQL and Redis only. Supply non-secret
+	// placeholders so the sanitized COS test configuration can still load.
+	t.Setenv("XINGYANSHU_COS_SECRET_ID", "avatar-db-test-placeholder")
+	t.Setenv("XINGYANSHU_COS_SECRET_KEY", "avatar-db-test-placeholder")
+	t.Setenv("XINGYANSHU_TMS_SECRET_ID", "avatar-db-test-placeholder")
+	t.Setenv("XINGYANSHU_TMS_SECRET_KEY", "avatar-db-test-placeholder")
 	cfg, err := config.Load(filepath.Join("..", "..", "..", "config", "test.yaml"))
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +74,7 @@ func TestAvatarRegistrationHTTPWithMySQLRedis(t *testing.T) {
 		db.Exec("DELETE FROM avatar_deletion_request WHERE profile_id IN (SELECT id FROM avatar_profile WHERE roster_member_id=?)", memberID)
 		db.Exec("DELETE FROM avatar_collection_session WHERE profile_id IN (SELECT id FROM avatar_profile WHERE roster_member_id=?)", memberID)
 		db.Exec("DELETE FROM avatar_consent WHERE account_id IN (SELECT id FROM avatar_h5_account WHERE mobile_hash=?)", hash(mobile))
-		db.Exec("DELETE FROM avatar_access_audit WHERE account_id IN (SELECT id FROM avatar_h5_account WHERE mobile_hash=?)", hash(mobile))
+		db.Exec("DELETE FROM avatar_access_audit WHERE actor_type='USER' AND actor_id IN (SELECT CAST(id AS CHAR) FROM avatar_h5_account WHERE mobile_hash=?)", hash(mobile))
 		db.Exec("DELETE FROM avatar_profile WHERE roster_member_id=?", memberID)
 		db.Exec("DELETE FROM avatar_identity_verification WHERE account_id IN (SELECT id FROM avatar_h5_account WHERE mobile_hash=?)", hash(mobile))
 		db.Exec("DELETE FROM avatar_h5_session WHERE account_id IN (SELECT id FROM avatar_h5_account WHERE mobile_hash=?)", hash(mobile))
@@ -78,49 +97,111 @@ func TestAvatarRegistrationHTTPWithMySQLRedis(t *testing.T) {
 	must(t, db.Table("avatar_registration_qrcode").Create(map[string]any{"id": qrID, "status": "ACTIVE", "version": 1, "qrcode_no": fmt.Sprintf("Q-%d", base), "city_registration_config_id": configID, "city_org_id": cityID, "city_code": "350100", "code_hash": hash(code)}).Error)
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	service := NewService(db, r, cfg.Auth, "test")
+	store := &exportMemoryStorage{objects: map[string][]byte{}}
+	service := NewService(db, r, cfg.Auth, "test", store)
 	RegisterRoutes(router.Group("/api/v1"), service, RequireAuthentication(db, cfg.Auth))
 	entry := callAvatar(t, router, http.MethodGet, "/api/v1/avatar/public/registration-context?code="+code, nil, "")
 	if entry.Code != 200 || fmt.Sprint(entry.Data["supportPhone"]) != "400-800-1234" {
 		t.Fatalf("entry=%+v", entry)
 	}
-	sent := callAvatar(t, router, http.MethodPost, "/api/v1/avatar/auth/sms/send", gin.H{"mobile": mobile, "scene": "AVATAR_LOGIN"}, "")
+	smsKey := fmt.Sprintf("avatar-sms-%d", base)
+	sent := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/auth/sms/send", gin.H{"mobile": mobile, "scene": "AVATAR_LOGIN"}, "", smsKey)
 	if sent.Code != 200 || fmt.Sprint(sent.Data["mockCode"]) != "123456" {
 		t.Fatalf("sms=%+v", sent)
 	}
-	logged := callAvatar(t, router, http.MethodPost, "/api/v1/avatar/auth/login", gin.H{"mobile": mobile, "smsCode": "123456"}, "")
+	sentReplay := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/auth/sms/send", gin.H{"mobile": mobile, "scene": "AVATAR_LOGIN"}, "", smsKey)
+	if sentReplay.Code != http.StatusOK || sentReplay.Header.Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("sms replay=%+v", sentReplay)
+	}
+	smsConflict := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/auth/sms/send", gin.H{"mobile": mobile, "scene": "OTHER"}, "", smsKey)
+	if smsConflict.Code != http.StatusConflict || !strings.Contains(smsConflict.Body, `"code":"IDEMPOTENCY_CONFLICT"`) {
+		t.Fatalf("sms conflict=%+v", smsConflict)
+	}
+	loginKey := fmt.Sprintf("avatar-login-%d", base)
+	logged := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/auth/login", gin.H{"mobile": mobile, "smsCode": "123456"}, "", loginKey)
 	if logged.Code != 200 || fmt.Sprint(logged.Data["accessToken"]) == "" {
 		t.Fatalf("login=%+v", logged)
 	}
-	token := fmt.Sprint(logged.Data["accessToken"])
-	refreshed := callAvatar(t, router, http.MethodPost, "/api/v1/avatar/auth/refresh", gin.H{"refreshToken": fmt.Sprint(logged.Data["refreshToken"])}, "")
+	loggedReplay := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/auth/login", gin.H{"mobile": mobile, "smsCode": "123456"}, "", loginKey)
+	if loggedReplay.Code != http.StatusOK || loggedReplay.Header.Get("Idempotency-Replayed") != "true" || fmt.Sprint(loggedReplay.Data["refreshToken"]) != fmt.Sprint(logged.Data["refreshToken"]) {
+		t.Fatalf("login replay=%+v", loggedReplay)
+	}
+	if conflict := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/auth/login", gin.H{"mobile": mobile, "smsCode": "000000"}, "", loginKey); conflict.Code != http.StatusConflict {
+		t.Fatalf("login conflict=%+v", conflict)
+	}
+	refreshKey := fmt.Sprintf("avatar-refresh-%d", base)
+	refreshed := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/auth/refresh", gin.H{"refreshToken": fmt.Sprint(logged.Data["refreshToken"])}, "", refreshKey)
 	if refreshed.Code != 200 || fmt.Sprint(refreshed.Data["accessToken"]) == "" {
 		t.Fatalf("refresh=%+v", refreshed)
 	}
-	token = fmt.Sprint(refreshed.Data["accessToken"])
-	started := callAvatar(t, router, http.MethodPost, "/api/v1/avatar/identity-verifications", gin.H{"verificationMethod": "TEST"}, token)
-	if started.Code != 201 {
-		t.Fatalf("start=%+v", started)
+	refreshedReplay := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/auth/refresh", gin.H{"refreshToken": fmt.Sprint(logged.Data["refreshToken"])}, "", refreshKey)
+	if refreshedReplay.Code != http.StatusOK || refreshedReplay.Header.Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("refresh replay=%+v", refreshedReplay)
 	}
-	completed := callAvatar(t, router, http.MethodPost, "/api/v1/avatar/test/identity-verifications/"+fmt.Sprint(started.Data["verificationId"])+"/complete", gin.H{"name": name, "gender": "FEMALE", "idNumberLast4": "1234"}, token)
-	if completed.Code != 200 {
-		t.Fatalf("complete=%+v", completed)
+	if conflict := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/auth/refresh", gin.H{"refreshToken": fmt.Sprint(logged.Data["refreshToken"]), "retry": true}, "", refreshKey); conflict.Code != http.StatusConflict {
+		t.Fatalf("refresh conflict=%+v", conflict)
 	}
-	bound := callAvatar(t, router, http.MethodPost, "/api/v1/avatar/roster-binding/confirm", gin.H{"registrationCode": code}, token)
+	token := fmt.Sprint(refreshed.Data["accessToken"])
+	identityKey := fmt.Sprintf("avatar-identity-%d", base)
+	identity := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/identity-verifications", gin.H{"verificationMethod": "MOCK"}, token, identityKey)
+	if identity.Code != http.StatusCreated {
+		t.Fatalf("identity=%+v", identity)
+	}
+	identityReplay := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/identity-verifications", gin.H{"verificationMethod": "MOCK"}, token, identityKey)
+	if identityReplay.Code != http.StatusCreated || identityReplay.Header.Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("identity replay=%+v", identityReplay)
+	}
+	if conflict := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/identity-verifications", gin.H{"verificationMethod": "OTHER"}, token, identityKey); conflict.Code != http.StatusConflict {
+		t.Fatalf("identity conflict=%+v", conflict)
+	}
+	mismatch := callAvatar(t, router, http.MethodPost, "/api/v1/avatar/roster-binding/confirm", gin.H{"registrationCode": code, "name": "不匹配姓名", "gender": "FEMALE"}, token)
+	if mismatch.Code != http.StatusUnprocessableEntity || !strings.Contains(mismatch.Body, `"code":"AVATAR_ROSTER_MATCH_NOT_FOUND"`) {
+		t.Fatalf("mismatch=%+v", mismatch)
+	}
+	bound := callAvatar(t, router, http.MethodPost, "/api/v1/avatar/roster-binding/confirm", gin.H{"registrationCode": code, "name": name, "gender": "FEMALE"}, token)
 	if bound.Code != 200 || fmt.Sprint(bound.Data["bindingStatus"]) != "BOUND" {
 		t.Fatalf("bound=%+v", bound)
 	}
-	consent := callAvatar(t, router, http.MethodPost, "/api/v1/avatar/consents", gin.H{"consentType": "COLLECT_AND_ARCHIVE", "agreementVersion": "v1.0", "accepted": true}, token)
+	consentKey := fmt.Sprintf("avatar-consent-%d", base)
+	consentBody := gin.H{"consentType": "COLLECT_AND_ARCHIVE", "agreementVersion": "v1.0", "accepted": true}
+	consent := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/consents", consentBody, token, consentKey)
 	if consent.Code != 201 {
 		t.Fatalf("consent=%+v", consent)
 	}
-	collection := callAvatar(t, router, http.MethodPost, "/api/v1/avatar/collection-sessions", gin.H{}, token)
+	consentReplay := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/consents", consentBody, token, consentKey)
+	if consentReplay.Code != http.StatusCreated || consentReplay.Header.Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("consent replay=%+v", consentReplay)
+	}
+	if conflict := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/consents", gin.H{"consentType": "COLLECT_AND_ARCHIVE", "agreementVersion": "v1.0", "accepted": false}, token, consentKey); conflict.Code != http.StatusConflict {
+		t.Fatalf("consent conflict=%+v", conflict)
+	}
+	collectionKey := fmt.Sprintf("avatar-collection-%d", base)
+	collection := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/collection-sessions", nil, token, collectionKey)
 	if collection.Code != 201 || fmt.Sprint(collection.Data["photoRequiredCount"]) != "8" {
 		t.Fatalf("collection=%+v", collection)
 	}
-	body := callAvatar(t, router, http.MethodPatch, "/api/v1/avatar/collection-sessions/"+fmt.Sprint(collection.Data["sessionId"])+"/body-data", gin.H{"gender": "FEMALE", "heightCm": 168, "bodyType": "SLIM", "bustCm": 82, "waistCm": 61, "hipsCm": 88}, token)
+	if len(collection.Data["requiredSlots"].([]any)) != 9 {
+		t.Fatalf("requiredSlots=%+v", collection.Data["requiredSlots"])
+	}
+	collectionReplay := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/collection-sessions", nil, token, collectionKey)
+	if collectionReplay.Code != http.StatusCreated || collectionReplay.Header.Get("Idempotency-Replayed") != "true" || fmt.Sprint(collectionReplay.Data["sessionId"]) != fmt.Sprint(collection.Data["sessionId"]) {
+		t.Fatalf("collection replay=%+v", collectionReplay)
+	}
+	if conflict := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/collection-sessions", gin.H{}, token, collectionKey); conflict.Code != http.StatusConflict {
+		t.Fatalf("collection conflict=%+v", conflict)
+	}
+	bodyKey := fmt.Sprintf("avatar-body-%d", base)
+	bodyBody := gin.H{"gender": "FEMALE", "heightCm": 168, "bodyType": "SLIM", "bustCm": 82, "waistCm": 61, "hipsCm": 88}
+	body := callAvatarWithKey(t, router, http.MethodPatch, "/api/v1/avatar/collection-sessions/"+fmt.Sprint(collection.Data["sessionId"])+"/body-data", bodyBody, token, bodyKey)
 	if body.Code != 200 || fmt.Sprint(body.Data["status"]) != "SAVED" {
 		t.Fatalf("body=%+v", body)
+	}
+	bodyReplay := callAvatarWithKey(t, router, http.MethodPatch, "/api/v1/avatar/collection-sessions/"+fmt.Sprint(collection.Data["sessionId"])+"/body-data", bodyBody, token, bodyKey)
+	if bodyReplay.Code != http.StatusOK || bodyReplay.Header.Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("body replay=%+v", bodyReplay)
+	}
+	if conflict := callAvatarWithKey(t, router, http.MethodPatch, "/api/v1/avatar/collection-sessions/"+fmt.Sprint(collection.Data["sessionId"])+"/body-data", gin.H{"gender": "FEMALE", "heightCm": 169, "bodyType": "SLIM"}, token, bodyKey); conflict.Code != http.StatusConflict {
+		t.Fatalf("body conflict=%+v", conflict)
 	}
 	var bodyStored struct{ BodyDataJSONCipher []byte }
 	must(t, db.Table("avatar_collection_session").Select("body_data_json_cipher").Where("id=?", collection.Data["sessionId"]).Take(&bodyStored).Error)
@@ -129,7 +210,9 @@ func TestAvatarRegistrationHTTPWithMySQLRedis(t *testing.T) {
 	}
 	must(t, db.Table("avatar_collection_session").Where("id=?", collection.Data["sessionId"]).Update("status", "PASSED").Error)
 	must(t, db.Table("avatar_profile").Where("roster_member_id=?", memberID).Updates(map[string]any{"status": "ARCHIVED", "collection_status": "PASSED", "quality_status": "PASSED", "archive_status": "ARCHIVED"}).Error)
-	reshoot := callAvatar(t, router, http.MethodPost, "/api/v1/avatar/profiles/me/reshoot", gin.H{"reason": "主动更新采集资料"}, token)
+	reshootKey := fmt.Sprintf("avatar-reshoot-%d", base)
+	reshootBody := gin.H{"reason": "主动更新采集资料"}
+	reshoot := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/profiles/me/reshoot", reshootBody, token, reshootKey)
 	if reshoot.Code != 201 || fmt.Sprint(reshoot.Data["reshoot"]) != "true" || fmt.Sprint(reshoot.Data["sessionId"]) == fmt.Sprint(collection.Data["sessionId"]) {
 		t.Fatalf("reshoot=%+v", reshoot)
 	}
@@ -138,13 +221,100 @@ func TestAvatarRegistrationHTTPWithMySQLRedis(t *testing.T) {
 	if inheritedAssets != 0 {
 		t.Fatalf("reshoot reused %d old assets", inheritedAssets)
 	}
-	deletion := callAvatar(t, router, http.MethodPost, "/api/v1/avatar/profiles/me/deletion-requests", gin.H{"reason": "测试删除状态"}, token)
+	reshootReplay := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/profiles/me/reshoot", reshootBody, token, reshootKey)
+	if reshootReplay.Code != http.StatusCreated || reshootReplay.Header.Get("Idempotency-Replayed") != "true" || fmt.Sprint(reshootReplay.Data["sessionId"]) != fmt.Sprint(reshoot.Data["sessionId"]) {
+		t.Fatalf("reshoot replay=%+v", reshootReplay)
+	}
+	if conflict := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/profiles/me/reshoot", gin.H{"reason": "不同原因"}, token, reshootKey); conflict.Code != http.StatusConflict {
+		t.Fatalf("reshoot conflict=%+v", conflict)
+	}
+	reshootSessionID := fmt.Sprint(reshoot.Data["sessionId"])
+	for i, slot := range requiredCaptureSlots {
+		captureSlot, assetType := slot["captureSlot"].(string), slot["assetType"].(string)
+		mimeType := "image/jpeg"
+		if assetType == "VOICE_VIDEO" {
+			mimeType = "video/mp4"
+		}
+		content := []byte(fmt.Sprintf("avatar-asset-%d-%s", base, captureSlot))
+		credentialBody := gin.H{"assetType": assetType, "captureSlot": captureSlot, "contentHash": hash(string(content)), "mimeType": mimeType, "fileSize": len(content)}
+		credentialKey := fmt.Sprintf("avatar-credential-%d-%d", base, i)
+		credentialPath := "/api/v1/avatar/collection-sessions/" + reshootSessionID + "/assets/upload-credentials"
+		credential := callAvatarWithKey(t, router, http.MethodPost, credentialPath, credentialBody, token, credentialKey)
+		if credential.Code != http.StatusOK {
+			t.Fatalf("credential slot=%s result=%+v", captureSlot, credential)
+		}
+		if i == 0 {
+			replay := callAvatarWithKey(t, router, http.MethodPost, credentialPath, credentialBody, token, credentialKey)
+			if replay.Code != http.StatusOK || replay.Header.Get("Idempotency-Replayed") != "true" {
+				t.Fatalf("credential replay=%+v", replay)
+			}
+			conflict := callAvatarWithKey(t, router, http.MethodPost, credentialPath, gin.H{"assetType": assetType, "captureSlot": captureSlot, "contentHash": hash("different"), "mimeType": mimeType, "fileSize": len(content)}, token, credentialKey)
+			if conflict.Code != http.StatusConflict {
+				t.Fatalf("credential conflict=%+v", conflict)
+			}
+		}
+		key := strings.TrimPrefix(fmt.Sprint(credential.Data["uploadURL"]), "https://example.test/upload/")
+		store.objects[key] = content
+		confirmPath := "/api/v1/avatar/collection-sessions/" + reshootSessionID + "/assets/confirm"
+		confirmBody := gin.H{"uploadToken": credential.Data["uploadToken"], "contentHash": hash(string(content))}
+		confirmKey := fmt.Sprintf("avatar-confirm-%d-%d", base, i)
+		confirmed := callAvatarWithKey(t, router, http.MethodPost, confirmPath, confirmBody, token, confirmKey)
+		if confirmed.Code != http.StatusOK {
+			t.Fatalf("confirm slot=%s result=%+v", captureSlot, confirmed)
+		}
+		if i == 0 {
+			replay := callAvatarWithKey(t, router, http.MethodPost, confirmPath, confirmBody, token, confirmKey)
+			if replay.Code != http.StatusOK || replay.Header.Get("Idempotency-Replayed") != "true" {
+				t.Fatalf("confirm replay=%+v", replay)
+			}
+			if conflict := callAvatarWithKey(t, router, http.MethodPost, confirmPath, gin.H{"uploadToken": credential.Data["uploadToken"], "contentHash": hash("different")}, token, confirmKey); conflict.Code != http.StatusConflict {
+				t.Fatalf("confirm conflict=%+v", conflict)
+			}
+		}
+	}
+	submitPath := "/api/v1/avatar/collection-sessions/" + reshootSessionID + "/submit"
+	submitKey := fmt.Sprintf("avatar-submit-%d", base)
+	submitted := callAvatarWithKey(t, router, http.MethodPost, submitPath, nil, token, submitKey)
+	if submitted.Code != http.StatusOK || fmt.Sprint(submitted.Data["status"]) != "AUTO_QUALITY_CHECKING" {
+		t.Fatalf("submit=%+v", submitted)
+	}
+	submittedReplay := callAvatarWithKey(t, router, http.MethodPost, submitPath, nil, token, submitKey)
+	if submittedReplay.Code != http.StatusOK || submittedReplay.Header.Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("submit replay=%+v", submittedReplay)
+	}
+	if conflict := callAvatarWithKey(t, router, http.MethodPost, submitPath, gin.H{}, token, submitKey); conflict.Code != http.StatusConflict {
+		t.Fatalf("submit conflict=%+v", conflict)
+	}
+	must(t, db.Table("avatar_profile").Where("roster_member_id=?", memberID).Updates(map[string]any{"status": "ARCHIVED", "collection_status": "PASSED", "quality_status": "PASSED", "archive_status": "ARCHIVED"}).Error)
+	deletionKey := fmt.Sprintf("avatar-delete-%d", base)
+	deletionBody := gin.H{"reason": "测试删除状态"}
+	deletion := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/profiles/me/deletion-requests", deletionBody, token, deletionKey)
 	if deletion.Code != 201 {
 		t.Fatalf("deletion=%+v", deletion)
+	}
+	deletionReplay := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/profiles/me/deletion-requests", deletionBody, token, deletionKey)
+	if deletionReplay.Code != http.StatusCreated || deletionReplay.Header.Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("deletion replay=%+v", deletionReplay)
+	}
+	if conflict := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/profiles/me/deletion-requests", gin.H{"reason": "不同原因"}, token, deletionKey); conflict.Code != http.StatusConflict {
+		t.Fatalf("deletion conflict=%+v", conflict)
 	}
 	latestDeletion := callAvatar(t, router, http.MethodGet, "/api/v1/avatar/profiles/me/deletion-requests/latest", nil, token)
 	if latestDeletion.Code != 200 || fmt.Sprint(latestDeletion.Data["status"]) != "PENDING" {
 		t.Fatalf("latest deletion=%+v", latestDeletion)
+	}
+	logoutKey := fmt.Sprintf("avatar-logout-%d", base)
+	loggedOut := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/auth/logout", nil, token, logoutKey)
+	if loggedOut.Code != http.StatusOK {
+		t.Fatalf("logout=%+v", loggedOut)
+	}
+	loggedOutReplay := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/auth/logout", nil, token, logoutKey)
+	if loggedOutReplay.Code != http.StatusOK || loggedOutReplay.Header.Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("logout replay=%+v", loggedOutReplay)
+	}
+	logoutConflict := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/auth/logout", gin.H{"retry": true}, token, logoutKey)
+	if logoutConflict.Code != http.StatusConflict {
+		t.Fatalf("logout conflict=%+v", logoutConflict)
 	}
 	var member struct {
 		BoundAccountID     uint64
@@ -661,18 +831,26 @@ func (s *exportMemoryStorage) Get(_ context.Context, key string) (io.ReadCloser,
 func (s *exportMemoryStorage) SignDownloadURL(context.Context, string, time.Duration) (string, error) {
 	return "https://example.test/download", nil
 }
+func (s *exportMemoryStorage) SignUploadURL(_ context.Context, key, _ string, _ time.Duration) (string, error) {
+	return "https://example.test/upload/" + key, nil
+}
 func (s *exportMemoryStorage) Delete(_ context.Context, key string) error {
 	s.deleted = key
 	return nil
 }
 
 type avatarResult struct {
-	Code int
-	Data map[string]any
-	Body string
+	Code   int
+	Data   map[string]any
+	Body   string
+	Header http.Header
 }
 
 func callAvatar(t *testing.T, r http.Handler, method, path string, body any, token string) avatarResult {
+	return callAvatarWithKey(t, r, method, path, body, token, fmt.Sprintf("avatar-test-%d", idgen.Next()))
+}
+
+func callAvatarWithKey(t *testing.T, r http.Handler, method, path string, body any, token, key string) avatarResult {
 	t.Helper()
 	var raw []byte
 	if body != nil {
@@ -680,6 +858,9 @@ func callAvatar(t *testing.T, r http.Handler, method, path string, body any, tok
 	}
 	q := httptest.NewRequest(method, path, bytes.NewReader(raw))
 	q.Header.Set("Content-Type", "application/json")
+	if method == http.MethodPost || method == http.MethodPatch || method == http.MethodPut || method == http.MethodDelete {
+		q.Header.Set("Idempotency-Key", key)
+	}
 	if token != "" {
 		q.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -689,7 +870,7 @@ func callAvatar(t *testing.T, r http.Handler, method, path string, body any, tok
 		Data map[string]any `json:"data"`
 	}
 	_ = json.Unmarshal(w.Body.Bytes(), &payload)
-	return avatarResult{w.Code, payload.Data, w.Body.String()}
+	return avatarResult{Code: w.Code, Data: payload.Data, Body: w.Body.String(), Header: w.Header()}
 }
 func must(t *testing.T, err error) {
 	t.Helper()

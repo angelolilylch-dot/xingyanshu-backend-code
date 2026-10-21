@@ -2,6 +2,7 @@
 package avatar
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -26,6 +27,7 @@ import (
 	"xingyanshu-backend/internal/modules/identity"
 	"xingyanshu-backend/internal/platform/filestore"
 	"xingyanshu-backend/internal/platform/httpx"
+	"xingyanshu-backend/internal/platform/idempotency"
 	"xingyanshu-backend/internal/platform/idgen"
 )
 
@@ -41,6 +43,90 @@ type Service struct {
 	storage     filestore.Storage
 }
 type Current struct{ AccountID, SessionID uint64 }
+
+func bindAvatarJSON(c *gin.Context, value any) ([]byte, bool) {
+	raw, ok := avatarRawRequest(c)
+	if !ok {
+		return nil, false
+	}
+	return raw, httpx.BindJSON(c, value)
+}
+
+func avatarRawRequest(c *gin.Context) ([]byte, bool) {
+	raw, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		httpx.AbortWithError(c, avatarError(http.StatusBadRequest, "VALIDATION_FORMAT_INVALID", "请求体读取失败", nil))
+		return nil, false
+	}
+	c.Request.Body = io.NopCloser(bytes.NewReader(raw))
+	return raw, true
+}
+
+func avatarWrite(c *gin.Context, s *Service, cur Current, raw []byte, status int, fn func(*Service) (any, *httpx.AppError)) {
+	result, replayed, err := idempotency.Execute(c.Request.Context(), s.db, idempotency.Scope{SubjectType: "AVATAR_H5", SubjectID: cur.AccountID, Method: c.Request.Method, Path: c.FullPath()}, c.GetHeader("Idempotency-Key"), raw, func(tx *gorm.DB) (idempotency.Result, error) {
+		scoped := *s
+		scoped.db = tx
+		data, appErr := fn(&scoped)
+		if appErr != nil {
+			return idempotency.Result{}, appErr
+		}
+		return idempotency.Result{HTTPStatus: status, Data: data}, nil
+	})
+	if err != nil {
+		if appErr, ok := err.(*httpx.AppError); ok {
+			httpx.AbortWithError(c, appErr)
+		} else {
+			httpx.AbortWithError(c, httpx.AppErrorFromIdempotency(err))
+		}
+		return
+	}
+	if replayed {
+		c.Header("Idempotency-Replayed", "true")
+	}
+	httpx.Success(c, result.HTTPStatus, result.Data)
+}
+
+// avatarPublicWrite applies the same durable idempotency contract before an
+// AVATAR_H5 account has been established.  The deterministic subject is
+// derived from an already supplied authentication secret (mobile or refresh
+// token), so callers never share a public idempotency namespace.
+func avatarPublicWrite(c *gin.Context, s *Service, subject string, raw []byte, status int, fn func(*Service) (any, *httpx.AppError)) {
+	cur := Current{AccountID: publicIdempotencySubject(subject)}
+	result, replayed, err := idempotency.Execute(c.Request.Context(), s.db, idempotency.Scope{SubjectType: "AVATAR_PUBLIC", SubjectID: cur.AccountID, Method: c.Request.Method, Path: c.FullPath()}, c.GetHeader("Idempotency-Key"), raw, func(tx *gorm.DB) (idempotency.Result, error) {
+		scoped := *s
+		scoped.db = tx
+		data, appErr := fn(&scoped)
+		if appErr != nil {
+			return idempotency.Result{}, appErr
+		}
+		return idempotency.Result{HTTPStatus: status, Data: data}, nil
+	})
+	if err != nil {
+		if appErr, ok := err.(*httpx.AppError); ok {
+			httpx.AbortWithError(c, appErr)
+		} else {
+			httpx.AbortWithError(c, httpx.AppErrorFromIdempotency(err))
+		}
+		return
+	}
+	if replayed {
+		c.Header("Idempotency-Replayed", "true")
+	}
+	httpx.Success(c, result.HTTPStatus, result.Data)
+}
+
+func publicIdempotencySubject(value string) uint64 {
+	sum := sha256.Sum256([]byte(value))
+	var id uint64
+	for _, b := range sum[:8] {
+		id = id<<8 | uint64(b)
+	}
+	if id == 0 {
+		return 1
+	}
+	return id
+}
+
 type account struct {
 	ID                   uint64
 	Status, MobileMasked string
@@ -101,7 +187,8 @@ func RequireAuthentication(db *gorm.DB, auth config.AuthConfig) gin.HandlerFunc 
 			return
 		}
 		var s session
-		if err := db.WithContext(c.Request.Context()).Table("avatar_h5_session").Where("id=? AND account_id=? AND status='ACTIVE' AND expires_at>?", sessionID, accountID, time.Now()).Take(&s).Error; err != nil || uint64(s.TokenVersion) != version {
+		allowLogoutReplay := c.Request.Method == http.MethodPost && c.FullPath() == "/api/v1/avatar/auth/logout"
+		if err := db.WithContext(c.Request.Context()).Table("avatar_h5_session").Where("id=? AND account_id=? AND expires_at>?", sessionID, accountID, time.Now()).Take(&s).Error; err != nil || uint64(s.TokenVersion) != version || (s.Status != "ACTIVE" && !(allowLogoutReplay && s.Status == "REVOKED")) {
 			reject(c)
 			return
 		}
@@ -127,62 +214,50 @@ func RegisterRoutes(group *gin.RouterGroup, s *Service, middleware gin.HandlerFu
 	})
 	public.POST("/auth/sms/send", func(c *gin.Context) {
 		var r smsRequest
-		if !httpx.BindJSON(c, &r) {
+		raw, ok := bindAvatarJSON(c, &r)
+		if !ok {
 			return
 		}
-		data, e := s.sendSMS(c.Request.Context(), r)
-		if e != nil {
-			httpx.AbortWithError(c, e)
-			return
-		}
-		httpx.Success(c, http.StatusOK, data)
+		avatarPublicWrite(c, s, "sms:"+r.Mobile, raw, http.StatusOK, func(scoped *Service) (any, *httpx.AppError) { return scoped.sendSMS(c.Request.Context(), r) })
 	})
 	public.POST("/auth/login", func(c *gin.Context) {
 		var r loginRequest
-		if !httpx.BindJSON(c, &r) {
+		raw, ok := bindAvatarJSON(c, &r)
+		if !ok {
 			return
 		}
-		data, e := s.login(c.Request.Context(), r)
-		if e != nil {
-			httpx.AbortWithError(c, e)
-			return
-		}
-		httpx.Success(c, http.StatusOK, data)
+		avatarPublicWrite(c, s, "login:"+r.Mobile, raw, http.StatusOK, func(scoped *Service) (any, *httpx.AppError) { return scoped.login(c.Request.Context(), r) })
 	})
 	public.POST("/auth/refresh", func(c *gin.Context) {
 		var r refreshRequest
-		if !httpx.BindJSON(c, &r) {
+		raw, ok := bindAvatarJSON(c, &r)
+		if !ok {
 			return
 		}
-		data, e := s.refresh(c.Request.Context(), r)
-		if e != nil {
-			httpx.AbortWithError(c, e)
-			return
-		}
-		httpx.Success(c, http.StatusOK, data)
+		avatarPublicWrite(c, s, "refresh:"+r.RefreshToken, raw, http.StatusOK, func(scoped *Service) (any, *httpx.AppError) { return scoped.refresh(c.Request.Context(), r) })
 	})
 	protected := public.Group("", middleware)
 	protected.POST("/auth/logout", func(c *gin.Context) {
 		cur, _ := CurrentFromContext(c)
-		e := s.logout(c.Request.Context(), cur)
-		if e != nil {
-			reject(c)
+		raw, ok := avatarRawRequest(c)
+		if !ok {
 			return
 		}
-		httpx.Success(c, http.StatusOK, gin.H{})
+		avatarWrite(c, s, cur, raw, http.StatusOK, func(scoped *Service) (any, *httpx.AppError) {
+			if e := scoped.logout(c.Request.Context(), cur); e != nil {
+				return nil, e
+			}
+			return gin.H{}, nil
+		})
 	})
 	protected.POST("/identity-verifications", func(c *gin.Context) {
 		var r identityStartRequest
-		if !httpx.BindJSON(c, &r) {
+		raw, ok := bindAvatarJSON(c, &r)
+		if !ok {
 			return
 		}
 		cur, _ := CurrentFromContext(c)
-		data, e := s.startIdentity(c.Request.Context(), cur, r)
-		if e != nil {
-			httpx.AbortWithError(c, e)
-			return
-		}
-		httpx.Success(c, http.StatusCreated, data)
+		avatarWrite(c, s, cur, raw, http.StatusCreated, func(scoped *Service) (any, *httpx.AppError) { return scoped.startIdentity(c.Request.Context(), cur, r) })
 	})
 	protected.GET("/identity-verifications/latest", func(c *gin.Context) {
 		cur, _ := CurrentFromContext(c)
@@ -195,16 +270,37 @@ func RegisterRoutes(group *gin.RouterGroup, s *Service, middleware gin.HandlerFu
 	})
 	protected.POST("/roster-binding/confirm", func(c *gin.Context) {
 		var r bindingRequest
+		raw, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			httpx.AbortWithError(c, avatarError(http.StatusBadRequest, "VALIDATION_FORMAT_INVALID", "请求体读取失败", nil))
+			return
+		}
+		c.Request.Body = io.NopCloser(bytes.NewReader(raw))
 		if !httpx.BindJSON(c, &r) {
 			return
 		}
 		cur, _ := CurrentFromContext(c)
-		data, e := s.confirmBinding(c.Request.Context(), cur, r)
+		result, replayed, e := idempotency.Execute(c.Request.Context(), s.db, idempotency.Scope{SubjectType: "AVATAR_H5", SubjectID: cur.AccountID, Method: c.Request.Method, Path: c.FullPath()}, c.GetHeader("Idempotency-Key"), raw, func(tx *gorm.DB) (idempotency.Result, error) {
+			scoped := *s
+			scoped.db = tx
+			data, appErr := scoped.confirmBinding(c.Request.Context(), cur, r)
+			if appErr != nil {
+				return idempotency.Result{}, appErr
+			}
+			return idempotency.Result{HTTPStatus: http.StatusOK, Data: data}, nil
+		})
 		if e != nil {
-			httpx.AbortWithError(c, e)
+			if appErr, ok := e.(*httpx.AppError); ok {
+				httpx.AbortWithError(c, appErr)
+				return
+			}
+			httpx.AbortWithError(c, httpx.AppErrorFromIdempotency(e))
 			return
 		}
-		httpx.Success(c, http.StatusOK, data)
+		if replayed {
+			c.Header("Idempotency-Replayed", "true")
+		}
+		httpx.Success(c, result.HTTPStatus, result.Data)
 	})
 	protected.GET("/consents/current", func(c *gin.Context) {
 		cur, _ := CurrentFromContext(c)
@@ -212,16 +308,14 @@ func RegisterRoutes(group *gin.RouterGroup, s *Service, middleware gin.HandlerFu
 	})
 	protected.POST("/consents", func(c *gin.Context) {
 		var r consentRequest
-		if !httpx.BindJSON(c, &r) {
+		raw, ok := bindAvatarJSON(c, &r)
+		if !ok {
 			return
 		}
 		cur, _ := CurrentFromContext(c)
-		data, e := s.acceptConsent(c.Request.Context(), cur, r, c.ClientIP())
-		if e != nil {
-			httpx.AbortWithError(c, e)
-			return
-		}
-		httpx.Success(c, http.StatusCreated, data)
+		avatarWrite(c, s, cur, raw, http.StatusCreated, func(scoped *Service) (any, *httpx.AppError) {
+			return scoped.acceptConsent(c.Request.Context(), cur, r, c.ClientIP())
+		})
 	})
 	protected.GET("/profiles/me", func(c *gin.Context) {
 		cur, _ := CurrentFromContext(c)
@@ -234,16 +328,14 @@ func RegisterRoutes(group *gin.RouterGroup, s *Service, middleware gin.HandlerFu
 	})
 	protected.POST("/profiles/me/deletion-requests", func(c *gin.Context) {
 		var r deletionRequest
-		if !httpx.BindJSON(c, &r) {
+		raw, ok := bindAvatarJSON(c, &r)
+		if !ok {
 			return
 		}
 		cur, _ := CurrentFromContext(c)
-		data, e := s.requestDeletion(c.Request.Context(), cur, r)
-		if e != nil {
-			httpx.AbortWithError(c, e)
-			return
-		}
-		httpx.Success(c, http.StatusCreated, data)
+		avatarWrite(c, s, cur, raw, http.StatusCreated, func(scoped *Service) (any, *httpx.AppError) {
+			return scoped.requestDeletion(c.Request.Context(), cur, r)
+		})
 	})
 	protected.GET("/profiles/me/deletion-requests/latest", func(c *gin.Context) {
 		cur, _ := CurrentFromContext(c)
@@ -256,73 +348,65 @@ func RegisterRoutes(group *gin.RouterGroup, s *Service, middleware gin.HandlerFu
 	})
 	protected.POST("/profiles/me/reshoot", func(c *gin.Context) {
 		var r reshootRequest
-		if !httpx.BindJSON(c, &r) {
+		raw, ok := bindAvatarJSON(c, &r)
+		if !ok {
 			return
 		}
 		cur, _ := CurrentFromContext(c)
-		data, e := s.reshoot(c.Request.Context(), cur, r, c.ClientIP())
-		if e != nil {
-			httpx.AbortWithError(c, e)
-			return
-		}
-		httpx.Success(c, http.StatusCreated, data)
+		avatarWrite(c, s, cur, raw, http.StatusCreated, func(scoped *Service) (any, *httpx.AppError) {
+			return scoped.reshoot(c.Request.Context(), cur, r, c.ClientIP())
+		})
 	})
 	protected.POST("/collection-sessions", func(c *gin.Context) {
 		cur, _ := CurrentFromContext(c)
-		data, e := s.startCollection(c.Request.Context(), cur)
-		if e != nil {
-			httpx.AbortWithError(c, e)
+		raw, ok := avatarRawRequest(c)
+		if !ok {
 			return
 		}
-		httpx.Success(c, http.StatusCreated, data)
+		avatarWrite(c, s, cur, raw, http.StatusCreated, func(scoped *Service) (any, *httpx.AppError) { return scoped.startCollection(c.Request.Context(), cur) })
 	})
 	protected.POST("/collection-sessions/:id/assets/upload-credentials", func(c *gin.Context) {
 		var r assetCredentialRequest
-		if !httpx.BindJSON(c, &r) {
+		raw, ok := bindAvatarJSON(c, &r)
+		if !ok {
 			return
 		}
 		cur, _ := CurrentFromContext(c)
-		data, e := s.assetCredentials(c.Request.Context(), cur, c.Param("id"), r)
-		if e != nil {
-			httpx.AbortWithError(c, e)
-			return
-		}
-		httpx.Success(c, http.StatusOK, data)
+		avatarWrite(c, s, cur, raw, http.StatusOK, func(scoped *Service) (any, *httpx.AppError) {
+			return scoped.assetCredentials(c.Request.Context(), cur, c.Param("id"), r)
+		})
 	})
 	protected.POST("/collection-sessions/:id/assets/confirm", func(c *gin.Context) {
 		var r assetConfirmRequest
-		if !httpx.BindJSON(c, &r) {
+		raw, ok := bindAvatarJSON(c, &r)
+		if !ok {
 			return
 		}
 		cur, _ := CurrentFromContext(c)
-		data, e := s.confirmAsset(c.Request.Context(), cur, c.Param("id"), r)
-		if e != nil {
-			httpx.AbortWithError(c, e)
-			return
-		}
-		httpx.Success(c, http.StatusOK, data)
+		avatarWrite(c, s, cur, raw, http.StatusOK, func(scoped *Service) (any, *httpx.AppError) {
+			return scoped.confirmAsset(c.Request.Context(), cur, c.Param("id"), r)
+		})
 	})
 	protected.POST("/collection-sessions/:id/submit", func(c *gin.Context) {
 		cur, _ := CurrentFromContext(c)
-		data, e := s.submitCollection(c.Request.Context(), cur, c.Param("id"))
-		if e != nil {
-			httpx.AbortWithError(c, e)
+		raw, ok := avatarRawRequest(c)
+		if !ok {
 			return
 		}
-		httpx.Success(c, http.StatusOK, data)
+		avatarWrite(c, s, cur, raw, http.StatusOK, func(scoped *Service) (any, *httpx.AppError) {
+			return scoped.submitCollection(c.Request.Context(), cur, c.Param("id"))
+		})
 	})
 	protected.PATCH("/collection-sessions/:id/body-data", func(c *gin.Context) {
 		var r bodyDataRequest
-		if !httpx.BindJSON(c, &r) {
+		raw, ok := bindAvatarJSON(c, &r)
+		if !ok {
 			return
 		}
 		cur, _ := CurrentFromContext(c)
-		data, e := s.saveBodyData(c.Request.Context(), cur, c.Param("id"), r)
-		if e != nil {
-			httpx.AbortWithError(c, e)
-			return
-		}
-		httpx.Success(c, http.StatusOK, data)
+		avatarWrite(c, s, cur, raw, http.StatusOK, func(scoped *Service) (any, *httpx.AppError) {
+			return scoped.saveBodyData(c.Request.Context(), cur, c.Param("id"), r)
+		})
 	})
 	if s.environment == "test" {
 		protected.POST("/test/identity-verifications/:id/complete", func(c *gin.Context) {
@@ -601,6 +685,8 @@ type identityStartRequest struct {
 }
 type bindingRequest struct {
 	RegistrationCode string `json:"registrationCode" binding:"required"`
+	Name             string `json:"name" binding:"required"`
+	Gender           string `json:"gender" binding:"required"`
 }
 type consentRequest struct {
 	ConsentType      string `json:"consentType" binding:"required"`
@@ -665,12 +751,15 @@ func (s *Service) registrationContext(ctx context.Context, code, clientIP string
 		CityCode, SupportContactName, SupportPhoneCipher string
 		Status                                           string
 	}
-	if err := s.db.WithContext(ctx).Table("avatar_city_registration_config").Select("city_code,support_contact_name,support_phone_cipher,status").Where("id=?", q.CityRegistrationConfigID).Take(&city).Error; err != nil || city.Status != "ACTIVE" {
+	if err := s.db.WithContext(ctx).Table("avatar_city_registration_config").Select("city_code,support_contact_name,support_phone_cipher,status").Where("id=?", q.CityRegistrationConfigID).Take(&city).Error; err != nil {
 		return nil, avatarError(http.StatusUnprocessableEntity, "AVATAR_QRCODE_INVALID", "建档入口暂不可用", nil)
 	}
 	phone, err := decrypt(s.auth.JWTSecret, []byte(city.SupportPhoneCipher))
 	if err != nil {
 		return nil, avatarError(http.StatusInternalServerError, "INTERNAL_ERROR", "建档入口配置异常", nil)
+	}
+	if city.Status != "ACTIVE" {
+		return gin.H{"cityName": city.CityCode, "cityCode": city.CityCode, "operatorName": city.SupportContactName, "supportPhone": phone, "entryStatus": city.Status, "available": false, "notice": "当前城市建档入口暂不可用", "retentionDays": 365}, nil
 	}
 	now := time.Now()
 	_ = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -694,7 +783,11 @@ func (s *Service) sendSMS(ctx context.Context, r smsRequest) (any, *httpx.AppErr
 		return nil, avatarError(http.StatusServiceUnavailable, "AVATAR_SMS_UNAVAILABLE", "短信服务暂不可用", nil)
 	}
 	if !ok {
-		return nil, avatarError(http.StatusTooManyRequests, "AVATAR_SMS_RATE_LIMITED", "请稍后再试", nil)
+		retryAfter, ttlErr := s.redis.TTL(ctx, key).Result()
+		if ttlErr != nil || retryAfter < 1 {
+			retryAfter = time.Second
+		}
+		return nil, avatarError(http.StatusTooManyRequests, "AVATAR_SMS_RATE_LIMITED", "请稍后再试", gin.H{"retryAfter": int(retryAfter.Seconds())})
 	}
 	now := time.Now()
 	if err = s.db.WithContext(ctx).Table("avatar_h5_sms_code_log").Create(map[string]any{"id": idgen.Next(), "status": "SENT", "version": 1, "mobile_hash": mh, "code_hash": hash("123456"), "scene": "AVATAR_LOGIN", "provider_request_no": fmt.Sprintf("TEST-SMS-%d", idgen.Next()), "expires_at": now.Add(5 * time.Minute), "status_changed_at": now, "status_changed_by_type": "SYSTEM"}).Error; err != nil {
@@ -843,8 +936,8 @@ func (s *Service) completeIdentityForTest(ctx context.Context, cur Current, idTe
 }
 
 func (s *Service) confirmBinding(ctx context.Context, cur Current, r bindingRequest) (any, *httpx.AppError) {
-	if strings.TrimSpace(r.RegistrationCode) == "" {
-		return nil, avatarError(400, "VALIDATION_REQUIRED", "缺少城市建档码", nil)
+	if strings.TrimSpace(r.RegistrationCode) == "" || strings.TrimSpace(r.Name) == "" || (r.Gender != "MALE" && r.Gender != "FEMALE") {
+		return nil, avatarError(400, "VALIDATION_FORMAT_INVALID", "建档信息不正确", nil)
 	}
 	var response gin.H
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -863,19 +956,12 @@ func (s *Service) confirmBinding(ctx context.Context, cur Current, r bindingRequ
 		if e := tx.Table("avatar_h5_account").Select("id,mobile_hash").Where("id=? AND status='ACTIVE'", cur.AccountID).Take(&a).Error; e != nil {
 			return e
 		}
-		var v struct {
-			ID                                       uint64
-			VerifiedNameHash, VerifiedGender, Status string
-		}
-		if e := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("avatar_identity_verification").Select("id,verified_name_hash,verified_gender,status").Where("account_id=? AND status='PASSED'", cur.AccountID).Order("verified_at DESC").Take(&v).Error; e != nil {
-			return errIdentity
-		}
 		var member struct {
 			ID                             uint64
 			PersonType, RegistrationStatus string
 			BoundAccountID                 *uint64
 		}
-		if e := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("avatar_roster_member").Select("id,person_type,registration_status,bound_account_id").Where("city_org_id=? AND status='ACTIVE' AND name_hash=? AND mobile_hash=? AND gender=?", q.CityOrgID, v.VerifiedNameHash, a.MobileHash, v.VerifiedGender).Take(&member).Error; e != nil {
+		if e := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("avatar_roster_member").Select("id,person_type,registration_status,bound_account_id").Where("city_org_id=? AND status='ACTIVE' AND name_hash=? AND mobile_hash=? AND gender=?", q.CityOrgID, hash(r.Name), a.MobileHash, r.Gender).Take(&member).Error; e != nil {
 			return errMismatch
 		}
 		if member.BoundAccountID != nil && *member.BoundAccountID != cur.AccountID {
@@ -898,17 +984,11 @@ func (s *Service) confirmBinding(ctx context.Context, cur Current, r bindingRequ
 		if e := tx.Table("avatar_h5_account").Where("id=?", cur.AccountID).Updates(map[string]any{"current_roster_member_id": member.ID, "updated_at": time.Now()}).Error; e != nil {
 			return e
 		}
-		if e := tx.Table("avatar_identity_verification").Where("id=?", v.ID).Update("roster_member_id", member.ID).Error; e != nil {
-			return e
-		}
 		response = gin.H{"rosterMemberId": fmt.Sprint(member.ID), "profileId": fmt.Sprint(profileID), "cityCode": q.CityCode, "personType": member.PersonType, "bindingStatus": "BOUND"}
 		return nil
 	})
 	if err == errQRCode {
 		return nil, avatarError(422, "AVATAR_QRCODE_INVALID", "建档二维码不可用", nil)
-	}
-	if err == errIdentity {
-		return nil, avatarError(422, "AVATAR_IDENTITY_VERIFICATION_REQUIRED", "请先完成实名核验", nil)
 	}
 	if err == errMismatch {
 		return nil, s.matchFailure(ctx, r.RegistrationCode)
@@ -923,7 +1003,6 @@ func (s *Service) confirmBinding(ctx context.Context, cur Current, r bindingRequ
 }
 
 var errQRCode = fmt.Errorf("qrcode")
-var errIdentity = fmt.Errorf("identity")
 var errMismatch = fmt.Errorf("mismatch")
 var errBound = fmt.Errorf("bound")
 

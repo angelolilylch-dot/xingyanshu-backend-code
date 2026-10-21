@@ -8,13 +8,13 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"net/http"
-	"strings"
 	"time"
 	"xingyanshu-backend/internal/platform/httpx"
 	"xingyanshu-backend/internal/platform/idgen"
 )
 
 const consentPurpose = "为建立个人数字形象档案，采集照片、朗读视频及可选体型资料；首次归档后保存365天。"
+const consentAgreementContent = "个人数字形象采集与入库授权\n\n您同意平台为建立个人数字形象档案，采集八张面部照片、朗读视频及您主动填写的可选体型资料。素材仅用于建档与质量管理，不用于对外使用授权。\n\n档案首次归档后保存365天；您可在保存期内申请删除。"
 
 func (s *Service) currentConsent(ctx context.Context, cur Current) any {
 	var v struct {
@@ -25,12 +25,12 @@ func (s *Service) currentConsent(ctx context.Context, cur Current) any {
 	}
 	e := s.db.WithContext(ctx).Table("avatar_consent").Select("id,agreement_version,signed_at,retention_until").Where("account_id=? AND status='ACTIVE' AND consent_type='COLLECT_AND_ARCHIVE'", cur.AccountID).Order("signed_at DESC").Take(&v).Error
 	if e != nil {
-		return gin.H{"status": "REQUIRED", "consentType": "COLLECT_AND_ARCHIVE", "retentionDays": 365, "purpose": consentPurpose}
+		return gin.H{"status": "REQUIRED", "consentType": "COLLECT_AND_ARCHIVE", "agreementVersion": consentAgreementVersion, "agreementContent": consentAgreementContent, "retentionDays": 365, "purpose": consentPurpose}
 	}
-	return gin.H{"status": "ACTIVE", "consentId": fmt.Sprint(v.ID), "consentType": "COLLECT_AND_ARCHIVE", "agreementVersion": v.AgreementVersion, "retentionDays": 365, "retentionUntil": v.RetentionUntil}
+	return gin.H{"status": "ACTIVE", "consentId": fmt.Sprint(v.ID), "consentType": "COLLECT_AND_ARCHIVE", "agreementVersion": v.AgreementVersion, "agreementContent": consentAgreementContent, "retentionDays": 365, "retentionUntil": v.RetentionUntil}
 }
 func (s *Service) acceptConsent(ctx context.Context, cur Current, r consentRequest, ip string) (any, *httpx.AppError) {
-	if r.ConsentType != "COLLECT_AND_ARCHIVE" || !r.Accepted || strings.TrimSpace(r.AgreementVersion) == "" {
+	if r.ConsentType != "COLLECT_AND_ARCHIVE" || !r.Accepted || r.AgreementVersion != consentAgreementVersion {
 		return nil, avatarError(400, "VALIDATION_FORMAT_INVALID", "授权信息不正确", nil)
 	}
 	var p struct {
@@ -56,15 +56,31 @@ func (s *Service) acceptConsent(ctx context.Context, cur Current, r consentReque
 func (s *Service) profileMe(ctx context.Context, cur Current) (any, *httpx.AppError) {
 	var p struct {
 		ID                                                                     uint64
+		CurrentCollectionSessionID                                             *uint64
+		Version                                                                uint32
+		ProfileNo                                                              string
 		Status, RealNameStatus, CollectionStatus, QualityStatus, ArchiveStatus string
-		RetentionUntil                                                         *time.Time
+		RetentionUntil, ArchivedAt                                             *time.Time
 	}
 	if e := s.db.WithContext(ctx).Table("avatar_profile").Where("account_id=?", cur.AccountID).Take(&p).Error; e != nil {
 		return nil, avatarError(404, "AVATAR_PROFILE_NOT_FOUND", "尚未完成名单绑定", nil)
 	}
+	var summary struct {
+		Photos, Videos     int64
+		BodyDataJSONCipher []byte
+		SubmittedAt        *time.Time
+	}
+	if p.CurrentCollectionSessionID != nil {
+		s.db.WithContext(ctx).Table("avatar_collection_session").Select("submitted_at,body_data_json_cipher").Where("id=?", *p.CurrentCollectionSessionID).Take(&summary)
+		s.db.WithContext(ctx).Table("avatar_asset").Select("SUM(CASE WHEN asset_type='FACE_PHOTO' AND status='CONFIRMED' THEN 1 ELSE 0 END) photos,SUM(CASE WHEN asset_type='VOICE_VIDEO' AND status='CONFIRMED' THEN 1 ELSE 0 END) videos").Where("collection_session_id=?", *p.CurrentCollectionSessionID).Scan(&summary)
+	}
 	var n int64
 	s.db.WithContext(ctx).Table("avatar_deletion_request").Where("profile_id=? AND status IN ('PENDING','APPROVED','PROCESSING')", p.ID).Count(&n)
-	return gin.H{"profileId": fmt.Sprint(p.ID), "status": p.Status, "realNameStatus": p.RealNameStatus, "collectionStatus": p.CollectionStatus, "qualityStatus": p.QualityStatus, "archiveStatus": p.ArchiveStatus, "retentionUntil": p.RetentionUntil, "canRequestDeletion": n == 0}, nil
+	latestSessionID := ""
+	if p.CurrentCollectionSessionID != nil {
+		latestSessionID = fmt.Sprint(*p.CurrentCollectionSessionID)
+	}
+	return gin.H{"profileId": fmt.Sprint(p.ID), "profileNo": p.ProfileNo, "version": p.Version, "status": p.Status, "realNameStatus": p.RealNameStatus, "collectionStatus": p.CollectionStatus, "qualityStatus": p.QualityStatus, "archiveStatus": p.ArchiveStatus, "archivedAt": p.ArchivedAt, "retentionUntil": p.RetentionUntil, "latestSessionId": latestSessionID, "summary": gin.H{"photoCount": summary.Photos, "videoCount": summary.Videos, "bodyDataFilled": len(summary.BodyDataJSONCipher) > 0}, "submittedAt": summary.SubmittedAt, "canRequestDeletion": n == 0}, nil
 }
 func (s *Service) requestDeletion(ctx context.Context, cur Current, r deletionRequest) (any, *httpx.AppError) {
 	var data gin.H
@@ -75,6 +91,9 @@ func (s *Service) requestDeletion(ctx context.Context, cur Current, r deletionRe
 		}
 		if e := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("avatar_profile").Where("account_id=?", cur.AccountID).Take(&p).Error; e != nil {
 			return e
+		}
+		if p.Status != "ARCHIVED" {
+			return fmt.Errorf("state")
 		}
 		var n int64
 		if e := tx.Table("avatar_deletion_request").Where("profile_id=? AND status IN ('PENDING','APPROVED','PROCESSING')", p.ID).Count(&n).Error; e != nil {
@@ -98,6 +117,9 @@ func (s *Service) requestDeletion(ctx context.Context, cur Current, r deletionRe
 		if err.Error() == "pending" {
 			return nil, avatarError(http.StatusConflict, "AVATAR_PROFILE_DELETION_PENDING", "删除申请处理中", nil)
 		}
+		if err.Error() == "state" {
+			return nil, avatarError(http.StatusConflict, "AVATAR_PROFILE_STATE_INVALID", "仅已归档档案可申请删除", nil)
+		}
 		return nil, avatarError(500, "INTERNAL_ERROR", "提交删除申请失败", nil)
 	}
 	return data, nil
@@ -115,6 +137,13 @@ func (s *Service) latestDeletionRequest(ctx context.Context, cur Current) (any, 
 	return gin.H{"deletionRequestId": fmt.Sprint(v.ID), "status": v.Status, "decision": v.Decision, "reason": v.StatusReason, "requestedAt": v.RequestedAt, "approvedAt": v.ApprovedAt, "purgedAt": v.PurgedAt}, nil
 }
 func (s *Service) reshoot(ctx context.Context, cur Current, r reshootRequest, ip string) (any, *httpx.AppError) {
+	var profile struct{ Status string }
+	if e := s.db.WithContext(ctx).Table("avatar_profile").Select("status").Where("account_id=?", cur.AccountID).Take(&profile).Error; e != nil {
+		return nil, avatarError(404, "AVATAR_PROFILE_NOT_FOUND", "尚未完成名单绑定", nil)
+	}
+	if profile.Status != "ARCHIVED" && profile.Status != "RESHOOT_REQUIRED" {
+		return nil, avatarError(http.StatusConflict, "AVATAR_PROFILE_STATE_INVALID", "当前档案状态不可补采", nil)
+	}
 	data, e := s.startCollection(ctx, cur)
 	if e != nil {
 		return nil, e
