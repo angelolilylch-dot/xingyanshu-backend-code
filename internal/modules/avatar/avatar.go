@@ -41,6 +41,7 @@ type Service struct {
 	auth        config.AuthConfig
 	environment string
 	storage     filestore.Storage
+	settings    config.AvatarConfig
 }
 type Current struct{ AccountID, SessionID uint64 }
 
@@ -139,7 +140,12 @@ type session struct {
 }
 
 func NewService(db *gorm.DB, r *redis.Client, auth config.AuthConfig, environment string, storage ...filestore.Storage) *Service {
-	s := &Service{db: db, redis: r, auth: auth, environment: environment}
+	return NewServiceWithConfig(db, r, auth, environment, config.AvatarConfig{}, storage...)
+}
+
+func NewServiceWithConfig(db *gorm.DB, r *redis.Client, auth config.AuthConfig, environment string, settings config.AvatarConfig, storage ...filestore.Storage) *Service {
+	settings = config.NormalizeAvatarConfig(settings)
+	s := &Service{db: db, redis: r, auth: auth, environment: environment, settings: settings}
 	if len(storage) > 0 {
 		s.storage = storage[0]
 	}
@@ -319,6 +325,10 @@ func RegisterRoutes(group *gin.RouterGroup, s *Service, middleware gin.HandlerFu
 	})
 	protected.GET("/profiles/me", func(c *gin.Context) {
 		cur, _ := CurrentFromContext(c)
+		if e := s.limitProfilePoll(c.Request.Context(), cur); e != nil {
+			httpx.AbortWithError(c, e)
+			return
+		}
 		data, e := s.profileMe(c.Request.Context(), cur)
 		if e != nil {
 			httpx.AbortWithError(c, e)
@@ -737,7 +747,7 @@ type testIdentityRequest struct {
 
 func (s *Service) registrationContext(ctx context.Context, code, clientIP string) (any, *httpx.AppError) {
 	if strings.TrimSpace(code) == "" {
-		return nil, avatarError(http.StatusUnprocessableEntity, "AVATAR_QRCODE_INVALID", "建档二维码不可用", nil)
+		return nil, s.invalidQRCodeError()
 	}
 	var q struct {
 		ID, CityRegistrationConfigID uint64
@@ -745,7 +755,7 @@ func (s *Service) registrationContext(ctx context.Context, code, clientIP string
 		ExpiresAt                    *time.Time
 	}
 	if err := s.db.WithContext(ctx).Table("avatar_registration_qrcode").Where("code_hash=?", hash(code)).Take(&q).Error; err != nil || q.Status != "ACTIVE" || (q.ExpiresAt != nil && q.ExpiresAt.Before(time.Now())) {
-		return nil, avatarError(http.StatusUnprocessableEntity, "AVATAR_QRCODE_INVALID", "建档二维码不可用", nil)
+		return nil, s.invalidQRCodeError()
 	}
 	var city struct {
 		CityCode, SupportContactName, SupportPhoneCipher string
@@ -778,7 +788,7 @@ func (s *Service) sendSMS(ctx context.Context, r smsRequest) (any, *httpx.AppErr
 	}
 	mh := hash(r.Mobile)
 	key := "avatar:sms:login:" + mh
-	ok, err := s.redis.SetNX(ctx, key, "1", time.Minute).Result()
+	ok, err := s.redis.SetNX(ctx, key, "1", s.settings.SMSResendInterval).Result()
 	if err != nil {
 		return nil, avatarError(http.StatusServiceUnavailable, "AVATAR_SMS_UNAVAILABLE", "短信服务暂不可用", nil)
 	}
@@ -789,11 +799,24 @@ func (s *Service) sendSMS(ctx context.Context, r smsRequest) (any, *httpx.AppErr
 		}
 		return nil, avatarError(http.StatusTooManyRequests, "AVATAR_SMS_RATE_LIMITED", "请稍后再试", gin.H{"retryAfter": int(retryAfter.Seconds())})
 	}
+	if e := s.consumeDailySMSQuota(ctx, mh); e != nil {
+		// Release the resend lock because this attempt was not accepted.
+		_ = s.redis.Del(ctx, key).Err()
+		return nil, e
+	}
 	now := time.Now()
 	if err = s.db.WithContext(ctx).Table("avatar_h5_sms_code_log").Create(map[string]any{"id": idgen.Next(), "status": "SENT", "version": 1, "mobile_hash": mh, "code_hash": hash("123456"), "scene": "AVATAR_LOGIN", "provider_request_no": fmt.Sprintf("TEST-SMS-%d", idgen.Next()), "expires_at": now.Add(5 * time.Minute), "status_changed_at": now, "status_changed_by_type": "SYSTEM"}).Error; err != nil {
 		return nil, avatarError(http.StatusInternalServerError, "INTERNAL_ERROR", "短信记录失败", nil)
 	}
-	return gin.H{"expiresIn": 300, "retryAfter": 60, "mockCode": "123456"}, nil
+	return gin.H{"expiresIn": 300, "retryAfter": int(s.settings.SMSResendInterval.Seconds()), "mockCode": "123456"}, nil
+}
+
+func (s *Service) invalidQRCodeError() *httpx.AppError {
+	data := gin.H{}
+	if phone := strings.TrimSpace(s.settings.FallbackSupportPhone); phone != "" {
+		data["supportPhone"] = phone
+	}
+	return avatarError(http.StatusUnprocessableEntity, "AVATAR_QRCODE_INVALID", "建档二维码不可用", data)
 }
 
 func (s *Service) login(ctx context.Context, r loginRequest) (any, *httpx.AppError) {
@@ -988,7 +1011,7 @@ func (s *Service) confirmBinding(ctx context.Context, cur Current, r bindingRequ
 		return nil
 	})
 	if err == errQRCode {
-		return nil, avatarError(422, "AVATAR_QRCODE_INVALID", "建档二维码不可用", nil)
+		return nil, s.invalidQRCodeError()
 	}
 	if err == errMismatch {
 		return nil, s.matchFailure(ctx, r.RegistrationCode)

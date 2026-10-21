@@ -41,6 +41,58 @@ func TestCaptureRequirementValidation(t *testing.T) {
 	}
 }
 
+func TestAvatarRateLimitsWithRedis(t *testing.T) {
+	if os.Getenv("XINGYANSHU_RUN_DB_TESTS") != "1" {
+		t.Skip("set XINGYANSHU_RUN_DB_TESTS=1")
+	}
+	t.Setenv("XINGYANSHU_COS_SECRET_ID", "avatar-rate-limit-placeholder")
+	t.Setenv("XINGYANSHU_COS_SECRET_KEY", "avatar-rate-limit-placeholder")
+	t.Setenv("XINGYANSHU_TMS_SECRET_ID", "avatar-rate-limit-placeholder")
+	t.Setenv("XINGYANSHU_TMS_SECRET_KEY", "avatar-rate-limit-placeholder")
+	cfg, err := config.Load(filepath.Join("..", "..", "..", "config", "test.yaml"))
+	must(t, err)
+	r, err := cache.OpenRedis(t.Context(), cfg.Redis)
+	must(t, err)
+	defer r.Close()
+	settings := cfg.Avatar
+	settings.SMSDailyLimit = 1
+	settings.UploadCredentialParallel = 2
+	settings.ProfilePollInterval = time.Minute
+	s := NewServiceWithConfig(nil, r, cfg.Auth, "test", settings)
+	id := idgen.Next()
+	mobileHash := hash(fmt.Sprintf("avatar-rate-%d", id))
+	dailyKey := fmt.Sprintf("avatar:sms:daily:%s:%s", time.Now().Format("20060102"), mobileHash)
+	pendingKey := fmt.Sprintf("avatar:upload:pending:%d", id)
+	pollKey := fmt.Sprintf("avatar:profile-poll:%d", id)
+	t.Cleanup(func() { r.Del(t.Context(), dailyKey, pendingKey, pollKey) })
+	if e := s.consumeDailySMSQuota(t.Context(), mobileHash); e != nil {
+		t.Fatalf("first daily quota=%+v", e)
+	}
+	if e := s.consumeDailySMSQuota(t.Context(), mobileHash); e == nil || e.Code != "AVATAR_SMS_DAILY_LIMITED" || e.Status != http.StatusTooManyRequests {
+		t.Fatalf("daily limit=%+v", e)
+	}
+	if e := s.reserveUploadCredential(t.Context(), id, "first"); e != nil {
+		t.Fatalf("first credential=%+v", e)
+	}
+	if e := s.reserveUploadCredential(t.Context(), id, "second"); e != nil {
+		t.Fatalf("second credential=%+v", e)
+	}
+	if e := s.reserveUploadCredential(t.Context(), id, "third"); e == nil || e.Code != "AVATAR_UPLOAD_CONCURRENCY_LIMITED" {
+		t.Fatalf("upload concurrency=%+v", e)
+	}
+	s.releaseUploadCredential(t.Context(), id, "first")
+	if e := s.reserveUploadCredential(t.Context(), id, "third"); e != nil {
+		t.Fatalf("released credential=%+v", e)
+	}
+	cur := Current{AccountID: id}
+	if e := s.limitProfilePoll(t.Context(), cur); e != nil {
+		t.Fatalf("first poll=%+v", e)
+	}
+	if e := s.limitProfilePoll(t.Context(), cur); e == nil || e.Code != "AVATAR_PROFILE_POLL_RATE_LIMITED" {
+		t.Fatalf("poll limit=%+v", e)
+	}
+}
+
 func TestAvatarRegistrationHTTPWithMySQLRedis(t *testing.T) {
 	if os.Getenv("XINGYANSHU_RUN_DB_TESTS") != "1" {
 		t.Skip("set XINGYANSHU_RUN_DB_TESTS=1")

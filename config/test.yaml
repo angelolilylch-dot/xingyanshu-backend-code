@@ -45,6 +45,14 @@ evidence:
   provider: mock
   callback_secret: xingyanshu_test_evidence_callback_secret
 
+avatar:
+  # 生产环境必须填真实客服电话；此号码仅用于测试回退展示。
+  fallback_support_phone: "400-800-1234"
+  sms_resend_interval: 1m
+  sms_daily_limit: 10
+  upload_credential_parallel: 3
+  profile_poll_interval: 2s
+
 file:
   storage:
     provider: cos

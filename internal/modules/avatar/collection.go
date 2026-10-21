@@ -24,7 +24,7 @@ func (s *Service) startCollection(ctx context.Context, cur Current) (any, *httpx
 		if e := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("avatar_profile").Select("id,status,current_version_no,current_collection_session_id").Where("account_id=?", cur.AccountID).Take(&p).Error; e != nil {
 			return e
 		}
-		if p.Status == "DELETION_REQUESTED" || p.Status == "DELETED" {
+		if p.Status == "DELETION_REQUESTED" || p.Status == "DELETION_PROCESSING" || p.Status == "DELETED" {
 			return fmt.Errorf("deleting")
 		}
 		var consent int64

@@ -76,7 +76,7 @@ func RunServer(cfg config.Config, configPath string) error {
 	workService := works.NewService(db, contentmoderation.NewProvider(cfg.ContentSafety), evidenceService)
 	productService := products.NewService(db, contentmoderation.NewProvider(cfg.ContentSafety), storage)
 	activityService := activities.NewService(db, contentmoderation.NewProvider(cfg.ContentSafety))
-	avatarService := avatar.NewService(db, redisClient, cfg.Auth, cfg.App.Environment, storage)
+	avatarService := avatar.NewServiceWithConfig(db, redisClient, cfg.Auth, cfg.App.Environment, cfg.Avatar, storage)
 	apiGroup := router.Group("/api/v1")
 	identity.RegisterPublicRoutes(apiGroup, captchaService, loginService)
 	identity.RegisterUnifiedRoutes(apiGroup, db, cfg.Auth, loginService)
@@ -126,7 +126,7 @@ func RunWorker(cfg config.Config) error {
 	productOrderService := productorders.NewService(db)
 	activityBookingService := activitybookings.NewService(db)
 	activityService := activities.NewService(db, contentmoderation.NewProvider(cfg.ContentSafety))
-	avatarService := avatar.NewService(db, nil, cfg.Auth, cfg.App.Environment, storage)
+	avatarService := avatar.NewServiceWithConfig(db, nil, cfg.Auth, cfg.App.Environment, cfg.Avatar, storage)
 	contractProcessor := payments.NewContractProcessor(db, fileService, evidenceService)
 	interval := time.Minute
 	log.Printf("worker started: environment=%s interval=%s jobs=auth-order-timeout,product-order-timeout,activity-booking-timeout,activity-booking-expiry,contract-generation,evidence-retry,activity-end,avatar-quality,avatar-export", cfg.App.Environment, interval)

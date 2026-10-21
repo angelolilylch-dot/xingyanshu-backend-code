@@ -48,12 +48,17 @@ func (s *Service) assetCredentials(ctx context.Context, cur Current, idText stri
 	if !ok {
 		return nil, avatarError(503, "AVATAR_STORAGE_UNAVAILABLE", "素材存储暂不支持直传", nil)
 	}
+	if e := s.reserveUploadCredential(ctx, row.ID, token); e != nil {
+		return nil, e
+	}
 	url, e := signer.SignUploadURL(ctx, key, r.MIMEType, 10*time.Minute)
 	if e != nil {
+		s.releaseUploadCredential(ctx, row.ID, token)
 		return nil, avatarError(503, "AVATAR_STORAGE_UNAVAILABLE", "素材存储暂不可用", nil)
 	}
 	raw, _ := json.Marshal(uploadGrant{row.ID, row.ProfileID, r.AssetType, r.CaptureSlot, strings.ToLower(r.ContentHash), r.MIMEType, key, r.FileSize})
 	if e = s.redis.Set(ctx, "avatar:upload:"+token, raw, 10*time.Minute).Err(); e != nil {
+		s.releaseUploadCredential(ctx, row.ID, token)
 		return nil, avatarError(503, "AVATAR_UPLOAD_TOKEN_UNAVAILABLE", "上传凭证暂不可用", nil)
 	}
 	return gin.H{"uploadToken": token, "uploadURL": url, "expiresIn": 600, "method": "PUT", "headers": gin.H{"Content-Type": r.MIMEType}}, nil
@@ -119,6 +124,7 @@ func (s *Service) confirmAsset(ctx context.Context, cur Current, idText string, 
 		return nil, avatarError(409, "RESOURCE_CONFLICT", "素材确认冲突", nil)
 	}
 	s.redis.Del(ctx, "avatar:upload:"+r.UploadToken)
+	s.releaseUploadCredential(ctx, g.SessionID, r.UploadToken)
 	return gin.H{"assetId": fmt.Sprint(assetID), "captureSlot": g.CaptureSlot, "status": "CONFIRMED"}, nil
 }
 func (s *Service) submitCollection(ctx context.Context, cur Current, idText string) (any, *httpx.AppError) {

@@ -27,7 +27,19 @@ type Config struct {
 	File          FileConfig          `yaml:"file"`
 	ContentSafety ContentSafetyConfig `yaml:"content_safety"`
 	Evidence      EvidenceConfig      `yaml:"evidence"`
+	Avatar        AvatarConfig        `yaml:"avatar"`
 	Bootstrap     BootstrapConfig     `yaml:"bootstrap"`
+}
+
+// AvatarConfig controls public support information and abuse-protection limits
+// for the independent AVATAR_H5.  The support phone is public contact data,
+// not a credential, and is returned only when a registration QR code is invalid.
+type AvatarConfig struct {
+	FallbackSupportPhone     string        `yaml:"fallback_support_phone"`
+	SMSResendInterval        time.Duration `yaml:"sms_resend_interval"`
+	SMSDailyLimit            int           `yaml:"sms_daily_limit"`
+	UploadCredentialParallel int           `yaml:"upload_credential_parallel"`
+	ProfilePollInterval      time.Duration `yaml:"profile_poll_interval"`
 }
 
 // LoggingConfig controls local, plain-text operational logs. Credentials are
@@ -141,6 +153,7 @@ func Load(path string) (Config, error) {
 	expandEnvironment(&cfg)
 	cfg.Logging = normalizeLoggingConfig(cfg.Logging, cfg.App.Environment)
 	cfg.File = normalizeFileConfig(cfg.File)
+	cfg.Avatar = NormalizeAvatarConfig(cfg.Avatar)
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -208,6 +221,22 @@ func normalizeFileConfig(value FileConfig) FileConfig {
 	return value
 }
 
+func NormalizeAvatarConfig(value AvatarConfig) AvatarConfig {
+	if value.SMSResendInterval <= 0 {
+		value.SMSResendInterval = time.Minute
+	}
+	if value.SMSDailyLimit <= 0 {
+		value.SMSDailyLimit = 10
+	}
+	if value.UploadCredentialParallel <= 0 {
+		value.UploadCredentialParallel = 3
+	}
+	if value.ProfilePollInterval <= 0 {
+		value.ProfilePollInterval = 2 * time.Second
+	}
+	return value
+}
+
 func (c Config) Validate() error {
 	if c.App.Name == "" || c.App.Environment == "" || c.App.Server.Address == "" {
 		return fmt.Errorf("app.name, app.environment and app.server.address are required")
@@ -232,6 +261,9 @@ func (c Config) Validate() error {
 			if origin == "*" {
 				return fmt.Errorf("cors.allowed_origins must not contain wildcard * in production")
 			}
+		}
+		if c.Avatar.FallbackSupportPhone == "" {
+			return fmt.Errorf("avatar.fallback_support_phone is required in production")
 		}
 	}
 	if c.Bootstrap.PlatformOrgName == "" || c.Bootstrap.InitialAdmin.Username == "" || c.Bootstrap.InitialAdmin.Password == "" || c.Bootstrap.InitialAdmin.DisplayName == "" {

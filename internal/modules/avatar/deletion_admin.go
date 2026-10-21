@@ -56,7 +56,10 @@ func (s *Service) decideDeletion(ctx context.Context, c identity.CurrentAdmin, i
 		if e := tx.Table("avatar_deletion_request").Where("id=?", id).Updates(map[string]any{"status": status, "decision": r.Decision, "retention_exception_code": nullable(r.RetentionExceptionCode), "status_reason": nullable(r.Reason), "approved_by": c.UserID, "approved_at": now, "updated_at": now, "status_changed_at": now, "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(c.UserID)}).Error; e != nil {
 			return e
 		}
-		pstatus := "ACTIVE"
+		// A deletion request can only originate from ARCHIVED. Rejections restore
+		// that user-visible profile state; never leak the internal ACTIVE value to
+		// the H5 status contract.
+		pstatus := "ARCHIVED"
 		if r.Decision == "APPROVED" {
 			pstatus = "DELETION_PROCESSING"
 		}
