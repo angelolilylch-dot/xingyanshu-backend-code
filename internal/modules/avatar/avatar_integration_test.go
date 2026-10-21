@@ -304,6 +304,21 @@ func TestAvatarRegistrationHTTPWithMySQLRedis(t *testing.T) {
 			if conflict.Code != http.StatusConflict {
 				t.Fatalf("credential conflict=%+v", conflict)
 			}
+			cancelPath := "/api/v1/avatar/collection-sessions/" + reshootSessionID + "/assets/cancel"
+			cancelBody := gin.H{"uploadToken": credential.Data["uploadToken"]}
+			cancelKey := fmt.Sprintf("avatar-cancel-%d-%d", base, i)
+			cancelled := callAvatarWithKey(t, router, http.MethodPost, cancelPath, cancelBody, token, cancelKey)
+			if cancelled.Code != http.StatusOK || fmt.Sprint(cancelled.Data["status"]) != "CANCELLED" {
+				t.Fatalf("cancel=%+v", cancelled)
+			}
+			cancelReplay := callAvatarWithKey(t, router, http.MethodPost, cancelPath, cancelBody, token, cancelKey)
+			if cancelReplay.Code != http.StatusOK || cancelReplay.Header.Get("Idempotency-Replayed") != "true" {
+				t.Fatalf("cancel replay=%+v", cancelReplay)
+			}
+			credential = callAvatarWithKey(t, router, http.MethodPost, credentialPath, credentialBody, token, credentialKey+"-after-cancel")
+			if credential.Code != http.StatusOK {
+				t.Fatalf("credential after cancel=%+v", credential)
+			}
 		}
 		key := strings.TrimPrefix(fmt.Sprint(credential.Data["uploadURL"]), "https://example.test/upload/")
 		store.objects[key] = content

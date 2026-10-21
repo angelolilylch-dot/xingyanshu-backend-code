@@ -398,6 +398,17 @@ func RegisterRoutes(group *gin.RouterGroup, s *Service, middleware gin.HandlerFu
 			return scoped.confirmAsset(c.Request.Context(), cur, c.Param("id"), r)
 		})
 	})
+	protected.POST("/collection-sessions/:id/assets/cancel", func(c *gin.Context) {
+		var r assetCancelRequest
+		raw, ok := bindAvatarJSON(c, &r)
+		if !ok {
+			return
+		}
+		cur, _ := CurrentFromContext(c)
+		avatarWrite(c, s, cur, raw, http.StatusOK, func(scoped *Service) (any, *httpx.AppError) {
+			return scoped.cancelAssetUpload(c.Request.Context(), cur, c.Param("id"), r)
+		})
+	})
 	protected.POST("/collection-sessions/:id/submit", func(c *gin.Context) {
 		cur, _ := CurrentFromContext(c)
 		raw, ok := avatarRawRequest(c)

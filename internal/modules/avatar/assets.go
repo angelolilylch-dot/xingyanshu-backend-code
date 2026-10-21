@@ -20,6 +20,10 @@ type uploadGrant struct {
 	AssetType, CaptureSlot, ContentHash, MIMEType, Key string
 	FileSize                                           int64
 }
+
+type assetCancelRequest struct {
+	UploadToken string `json:"uploadToken" binding:"required,min=16,max=256"`
+}
 type uploadSigner interface {
 	SignUploadURL(context.Context, string, string, time.Duration) (string, error)
 }
@@ -126,6 +130,35 @@ func (s *Service) confirmAsset(ctx context.Context, cur Current, idText string, 
 	s.redis.Del(ctx, "avatar:upload:"+r.UploadToken)
 	s.releaseUploadCredential(ctx, g.SessionID, r.UploadToken)
 	return gin.H{"assetId": fmt.Sprint(assetID), "captureSlot": g.CaptureSlot, "status": "CONFIRMED"}, nil
+}
+
+// cancelAssetUpload immediately releases a credential reservation when the
+// client abandons an upload. The signed COS URL remains time-limited, but can
+// no longer be confirmed after the token is removed.
+func (s *Service) cancelAssetUpload(ctx context.Context, cur Current, idText string, r assetCancelRequest) (any, *httpx.AppError) {
+	id, ok := parseUint(idText)
+	if !ok || strings.TrimSpace(r.UploadToken) == "" {
+		return nil, avatarError(400, "VALIDATION_FORMAT_INVALID", "上传取消参数不正确", nil)
+	}
+	raw, e := s.redis.Get(ctx, "avatar:upload:"+r.UploadToken).Bytes()
+	if e != nil {
+		// Cancellation is intentionally repeatable so a client can safely retry
+		// after a network interruption or a first successful cancellation.
+		return gin.H{"uploadToken": r.UploadToken, "status": "CANCELLED"}, nil
+	}
+	var g uploadGrant
+	if json.Unmarshal(raw, &g) != nil || g.SessionID != id {
+		return nil, avatarError(422, "AVATAR_UPLOAD_TOKEN_INVALID", "上传凭证不匹配", nil)
+	}
+	var owned uint64
+	if e := s.db.WithContext(ctx).Table("avatar_collection_session cs").Select("cs.id").Joins("JOIN avatar_profile p ON p.id=cs.profile_id").Where("cs.id=? AND p.account_id=? AND cs.status='COLLECTING'", id, cur.AccountID).Scan(&owned).Error; e != nil || owned == 0 {
+		return nil, avatarError(404, "AVATAR_COLLECTION_NOT_FOUND", "采集会话不存在或不可取消", nil)
+	}
+	if e := s.redis.Del(ctx, "avatar:upload:"+r.UploadToken).Err(); e != nil {
+		return nil, avatarError(503, "AVATAR_UPLOAD_TOKEN_UNAVAILABLE", "上传凭证暂不可用", nil)
+	}
+	s.releaseUploadCredential(ctx, g.SessionID, r.UploadToken)
+	return gin.H{"uploadToken": r.UploadToken, "status": "CANCELLED"}, nil
 }
 func (s *Service) submitCollection(ctx context.Context, cur Current, idText string) (any, *httpx.AppError) {
 	id, ok := parseUint(idText)
