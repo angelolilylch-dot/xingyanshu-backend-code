@@ -751,33 +751,23 @@ func (s *Service) registrationContext(ctx context.Context, code, clientIP string
 		return nil, s.invalidQRCodeError()
 	}
 	var q struct {
-		ID, CityRegistrationConfigID uint64
-		CityCode, Status             string
-		ExpiresAt                    *time.Time
+		ID               uint64
+		CityCode, Status string
+		ExpiresAt        *time.Time
 	}
 	if err := s.db.WithContext(ctx).Table("avatar_registration_qrcode").Where("code_hash=?", hash(code)).Take(&q).Error; err != nil || q.Status != "ACTIVE" || (q.ExpiresAt != nil && q.ExpiresAt.Before(time.Now())) {
 		return nil, s.invalidQRCodeError()
 	}
-	var city struct {
-		CityCode, SupportContactName, SupportPhoneCipher string
-		Status                                           string
-	}
-	if err := s.db.WithContext(ctx).Table("avatar_city_registration_config").Select("city_code,support_contact_name,support_phone_cipher,status").Where("id=?", q.CityRegistrationConfigID).Take(&city).Error; err != nil {
-		return nil, avatarError(http.StatusUnprocessableEntity, "AVATAR_QRCODE_INVALID", "建档入口暂不可用", nil)
-	}
-	phone, err := decrypt(s.auth.JWTSecret, []byte(city.SupportPhoneCipher))
-	if err != nil {
-		return nil, avatarError(http.StatusInternalServerError, "INTERNAL_ERROR", "建档入口配置异常", nil)
-	}
-	if city.Status != "ACTIVE" {
-		return gin.H{"cityName": city.CityCode, "cityCode": city.CityCode, "operatorName": city.SupportContactName, "supportPhone": phone, "entryStatus": city.Status, "available": false, "notice": "当前城市建档入口暂不可用", "retentionDays": 365}, nil
+	phone := strings.TrimSpace(s.settings.FallbackSupportPhone)
+	if q.Status != "ACTIVE" {
+		return gin.H{"cityName": q.CityCode, "cityCode": q.CityCode, "supportPhone": phone, "entryStatus": q.Status, "available": false, "notice": "当前城市建档入口暂不可用", "retentionDays": 365}, nil
 	}
 	now := time.Now()
 	_ = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		tx.Table("avatar_registration_qrcode").Where("id=?", q.ID).Update("scan_count", gorm.Expr("scan_count+1"))
 		return tx.Table("avatar_qrcode_scan_log").Create(map[string]any{"id": idgen.Next(), "qrcode_id": q.ID, "result_code": "SUCCESS", "scan_at": now, "client_ip_hash": hash(clientIP)}).Error
 	})
-	return gin.H{"cityName": city.CityCode, "cityCode": city.CityCode, "operatorName": city.SupportContactName, "supportPhone": phone, "entryStatus": "ACTIVE", "retentionDays": 365}, nil
+	return gin.H{"cityName": q.CityCode, "cityCode": q.CityCode, "supportPhone": phone, "entryStatus": "ACTIVE", "retentionDays": 365}, nil
 }
 
 func (s *Service) sendSMS(ctx context.Context, r smsRequest) (any, *httpx.AppError) {
@@ -1031,12 +1021,7 @@ var errMismatch = fmt.Errorf("mismatch")
 var errBound = fmt.Errorf("bound")
 
 func (s *Service) matchFailure(ctx context.Context, code string) *httpx.AppError {
-	var q struct{ CityRegistrationConfigID uint64 }
-	_ = s.db.WithContext(ctx).Table("avatar_registration_qrcode").Select("city_registration_config_id").Where("code_hash=?", hash(code)).Take(&q).Error
-	var city struct{ SupportPhoneCipher string }
-	_ = s.db.WithContext(ctx).Table("avatar_city_registration_config").Select("support_phone_cipher").Where("id=?", q.CityRegistrationConfigID).Take(&city).Error
-	phone, _ := decrypt(s.auth.JWTSecret, []byte(city.SupportPhoneCipher))
-	return avatarError(422, "AVATAR_ROSTER_MATCH_NOT_FOUND", "暂时无法完成建档，请联系城市运营方核实导入信息。", gin.H{"supportPhone": phone})
+	return avatarError(422, "AVATAR_ROSTER_MATCH_NOT_FOUND", "暂时无法完成建档，请联系客服核实导入信息。", gin.H{"supportPhone": strings.TrimSpace(s.settings.FallbackSupportPhone)})
 }
 
 func reject(c *gin.Context) {

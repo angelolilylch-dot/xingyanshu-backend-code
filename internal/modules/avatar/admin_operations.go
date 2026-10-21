@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -194,10 +195,6 @@ func (s *Service) createQRCode(ctx context.Context, c identity.CurrentAdmin) (an
 	if ae != nil {
 		return nil, ae
 	}
-	var conf struct{ ID uint64 }
-	if e := s.db.WithContext(ctx).Table("avatar_city_registration_config").Where("city_org_id=? AND status='ACTIVE'", city).Take(&conf).Error; e != nil {
-		return nil, avatarError(422, "AVATAR_CITY_CONFIG_REQUIRED", "请先配置城市建档联系人", nil)
-	}
 	token, e := randomToken()
 	if e != nil {
 		return nil, avatarError(500, "INTERNAL_ERROR", "生成二维码失败", nil)
@@ -208,12 +205,33 @@ func (s *Service) createQRCode(ctx context.Context, c identity.CurrentAdmin) (an
 		if e := tx.Table("avatar_registration_qrcode").Where("city_org_id=? AND status='ACTIVE'", city).Updates(map[string]any{"status": "REVOKED", "updated_at": now}).Error; e != nil {
 			return e
 		}
-		return tx.Table("avatar_registration_qrcode").Create(map[string]any{"id": id, "status": "ACTIVE", "version": 1, "qrcode_no": fmt.Sprintf("AVQR-%d", id), "city_registration_config_id": conf.ID, "city_org_id": city, "city_code": code, "code_hash": hash(token), "created_by": c.UserID, "status_changed_at": now, "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(c.UserID)}).Error
+		return tx.Table("avatar_registration_qrcode").Create(map[string]any{"id": id, "status": "ACTIVE", "version": 1, "qrcode_no": fmt.Sprintf("AVQR-%d", id), "city_registration_config_id": nil, "city_org_id": city, "city_code": code, "code_hash": hash(token), "created_by": c.UserID, "status_changed_at": now, "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(c.UserID)}).Error
 	})
 	if e != nil {
 		return nil, avatarError(500, "INTERNAL_ERROR", "创建二维码失败", nil)
 	}
-	return gin.H{"qrcodeId": fmt.Sprint(id), "shortCode": token, "registrationPath": "/api/v1/avatar/public/registration-context?code=" + token, "status": "ACTIVE"}, nil
+	entryURL, err := s.registrationH5URL(token)
+	if err != nil {
+		return nil, avatarError(503, "AVATAR_H5_ENTRY_NOT_CONFIGURED", "建档 H5 入口尚未配置", nil)
+	}
+	return gin.H{"qrcodeId": fmt.Sprint(id), "shortCode": token, "registrationURL": entryURL, "registrationPath": "/api/v1/avatar/public/registration-context?code=" + token, "status": "ACTIVE"}, nil
+}
+
+// registrationH5URL returns the exact URL that must be encoded into a city QR
+// code. The short code is only an opaque city-entry locator, never a credential.
+func (s *Service) registrationH5URL(code string) (string, error) {
+	base := strings.TrimSpace(s.settings.RegistrationH5URL)
+	if base == "" {
+		return "", fmt.Errorf("registration h5 URL is empty")
+	}
+	u, err := url.Parse(base)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("invalid registration h5 URL")
+	}
+	query := u.Query()
+	query.Set("code", code)
+	u.RawQuery = query.Encode()
+	return u.String(), nil
 }
 
 func (s *Service) listRosterBatches(ctx context.Context, c identity.CurrentAdmin) (any, *httpx.AppError) {

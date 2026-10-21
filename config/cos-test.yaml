@@ -47,8 +47,10 @@ evidence:
   callback_secret: xingyanshu_test_evidence_callback_secret
 
 avatar:
-  # 生产环境必须填真实客服电话；此号码仅用于测试回退展示。
+  # 扫码建档 H5 统一展示的固定客服号码；不按城市维护联系人。
   fallback_support_phone: "400-800-1234"
+  # 后台创建二维码时返回的可直接扫码打开的独立 H5 地址。
+  registration_h5_url: "https://avatar-h5.test.xingyanshu.example/register"
   # 名单导入时直接调用三要素实名服务；mock 仅允许 test 环境。
   roster_identity_provider: mock
   sms_resend_interval: 1m

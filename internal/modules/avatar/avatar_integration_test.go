@@ -150,7 +150,7 @@ func TestAvatarRegistrationHTTPWithMySQLRedis(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	store := &exportMemoryStorage{objects: map[string][]byte{}}
-	service := NewService(db, r, cfg.Auth, "test", store)
+	service := NewServiceWithConfig(db, r, cfg.Auth, "test", cfg.Avatar, store)
 	RegisterRoutes(router.Group("/api/v1"), service, RequireAuthentication(db, cfg.Auth))
 	entry := callAvatar(t, router, http.MethodGet, "/api/v1/avatar/public/registration-context?code="+code, nil, "")
 	if entry.Code != 200 || fmt.Sprint(entry.Data["supportPhone"]) != "400-800-1234" {
@@ -421,7 +421,7 @@ func TestAvatarCityOperationsWithMySQL(t *testing.T) {
 	file, fileHeader, err := req.FormFile("file")
 	must(t, err)
 	defer file.Close()
-	s := NewService(db, nil, cfg.Auth, "test")
+	s := NewServiceWithConfig(db, nil, cfg.Auth, "test", cfg.Avatar)
 	data, ae := s.importRoster(t.Context(), admin, fileHeader)
 	if ae != nil {
 		t.Fatalf("import=%+v", ae)
@@ -463,13 +463,13 @@ func TestAvatarCityOperationsWithMySQL(t *testing.T) {
 	if ae != nil || len(batches.(gin.H)["items"].([]map[string]any)) == 0 {
 		t.Fatalf("batches=%+v err=%+v", batches, ae)
 	}
-	_, ae = s.saveCityConfig(t.Context(), admin, cityConfigRequest{SupportContactName: "测试运营", SupportContactPhone: "13900000999"})
-	if ae != nil {
-		t.Fatalf("config=%+v", ae)
-	}
 	qr, ae := s.createQRCode(t.Context(), admin)
-	if ae != nil || fmt.Sprint(qr.(gin.H)["shortCode"]) == "" {
+	if ae != nil || fmt.Sprint(qr.(gin.H)["shortCode"]) == "" || !strings.HasPrefix(fmt.Sprint(qr.(gin.H)["registrationURL"]), "https://avatar-h5.test.xingyanshu.example/register?code=") {
 		t.Fatalf("qr=%+v err=%+v", qr, ae)
+	}
+	entry, ae := s.registrationContext(t.Context(), fmt.Sprint(qr.(gin.H)["shortCode"]), "127.0.0.1")
+	if ae != nil || fmt.Sprint(entry.(gin.H)["supportPhone"]) != cfg.Avatar.FallbackSupportPhone || entry.(gin.H)["operatorName"] != nil {
+		t.Fatalf("entry=%+v err=%+v", entry, ae)
 	}
 	var member uint64
 	must(t, db.Table("avatar_roster_member").Select("id").Where("roster_batch_id=?", batchID).Scan(&member).Error)

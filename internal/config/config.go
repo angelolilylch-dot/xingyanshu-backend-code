@@ -2,7 +2,9 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -32,10 +34,11 @@ type Config struct {
 }
 
 // AvatarConfig controls public support information and abuse-protection limits
-// for the independent AVATAR_H5.  The support phone is public contact data,
-// not a credential, and is returned only when a registration QR code is invalid.
+// for the independent AVATAR_H5. The support phone is public contact data,
+// not a credential, and is returned for every registration QR-code outcome.
 type AvatarConfig struct {
 	FallbackSupportPhone     string        `yaml:"fallback_support_phone"`
+	RegistrationH5URL        string        `yaml:"registration_h5_url"`
 	RosterIdentityProvider   string        `yaml:"roster_identity_provider"`
 	SMSResendInterval        time.Duration `yaml:"sms_resend_interval"`
 	SMSDailyLimit            int           `yaml:"sms_daily_limit"`
@@ -266,6 +269,9 @@ func (c Config) Validate() error {
 		if c.Avatar.FallbackSupportPhone == "" {
 			return fmt.Errorf("avatar.fallback_support_phone is required in production")
 		}
+		if err := validateAvatarRegistrationH5URL(c.Avatar.RegistrationH5URL); err != nil {
+			return err
+		}
 		if c.Avatar.RosterIdentityProvider == "" || c.Avatar.RosterIdentityProvider == "mock" {
 			return fmt.Errorf("avatar.roster_identity_provider must be a real provider in production")
 		}
@@ -308,6 +314,14 @@ func (c Config) Validate() error {
 	}
 	if c.Evidence.Provider == "mock" && (c.App.Environment != "test" || c.Evidence.CallbackSecret == "") {
 		return fmt.Errorf("evidence mock is only allowed in test with callback_secret")
+	}
+	return nil
+}
+
+func validateAvatarRegistrationH5URL(value string) error {
+	u, err := url.ParseRequestURI(strings.TrimSpace(value))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("avatar.registration_h5_url must be an absolute http or https URL in production")
 	}
 	return nil
 }
