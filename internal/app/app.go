@@ -129,7 +129,7 @@ func RunWorker(cfg config.Config) error {
 	avatarService := avatar.NewServiceWithConfig(db, nil, cfg.Auth, cfg.App.Environment, cfg.Avatar, storage)
 	contractProcessor := payments.NewContractProcessor(db, fileService, evidenceService)
 	interval := time.Minute
-	log.Printf("worker started: environment=%s interval=%s jobs=auth-order-timeout,product-order-timeout,activity-booking-timeout,activity-booking-expiry,contract-generation,evidence-retry,activity-end,avatar-quality,avatar-export", cfg.App.Environment, interval)
+	log.Printf("worker started: environment=%s interval=%s jobs=auth-order-timeout,product-order-timeout,activity-booking-timeout,activity-booking-expiry,contract-generation,evidence-retry,activity-end,avatar-quality,avatar-roster-identity,avatar-export", cfg.App.Environment, interval)
 	for {
 		if count, err := service.CloseExpired(context.Background()); err != nil {
 			logx.Errorf("module=authorders action=close_expired stage=worker error_type=%T error=%q", err, logx.Redact(err.Error()))
@@ -178,6 +178,12 @@ func RunWorker(cfg config.Config) error {
 			log.Printf("process avatar quality tasks failed: %v", err)
 		} else if count > 0 {
 			log.Printf("processed avatar quality tasks: count=%d", count)
+		}
+		if count, err := avatarService.ProcessPendingRosterIdentity(context.Background(), 50); err != nil {
+			logx.Errorf("module=avatar action=process_roster_identity stage=worker error_type=%T error=%q", err, logx.Redact(err.Error()))
+			log.Printf("process avatar roster identity failed: %v", err)
+		} else if count > 0 {
+			log.Printf("processed avatar roster identity records: count=%d", count)
 		}
 		if count, err := avatarService.ProcessDueExports(context.Background(), 20); err != nil {
 			logx.Errorf("module=avatar action=process_due_exports stage=worker error_type=%T error=%q", err, logx.Redact(err.Error()))

@@ -48,6 +48,8 @@ evidence:
 avatar:
   # 生产环境必须填真实客服电话；此号码仅用于测试回退展示。
   fallback_support_phone: "400-800-1234"
+  # 名单导入时直接调用三要素实名服务；mock 仅允许 test 环境。
+  roster_identity_provider: mock
   sms_resend_interval: 1m
   sms_daily_limit: 10
   upload_credential_parallel: 3

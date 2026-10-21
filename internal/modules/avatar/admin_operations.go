@@ -41,11 +41,12 @@ func (s *Service) rosterTemplate(c *gin.Context) {
 	sheet := f.GetSheetName(0)
 	f.SetSheetName(sheet, "名单导入")
 	sheet = "名单导入"
-	_ = f.SetSheetRow(sheet, "A1", &[]any{"姓名", "手机号", "性别"})
+	_ = f.SetSheetRow(sheet, "A1", &[]any{"姓名", "身份证号", "手机号", "性别"})
 	_ = f.SetColWidth(sheet, "A", "A", 18)
-	_ = f.SetColWidth(sheet, "B", "B", 20)
-	_ = f.SetColWidth(sheet, "C", "C", 12)
-	_ = f.AddDataValidation(sheet, &excelize.DataValidation{Sqref: "C2:C1048576", Type: "list", Formula1: "\"男,女\""})
+	_ = f.SetColWidth(sheet, "B", "B", 24)
+	_ = f.SetColWidth(sheet, "C", "C", 20)
+	_ = f.SetColWidth(sheet, "D", "D", 12)
+	_ = f.AddDataValidation(sheet, &excelize.DataValidation{Sqref: "D2:D1048576", Type: "list", Formula1: "\"男,女\""})
 	f.SetPanes(sheet, &excelize.Panes{Freeze: true, Split: true, YSplit: 1, TopLeftCell: "A2", ActivePane: "bottomLeft"})
 	c.Header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 	c.Header("Content-Disposition", `attachment; filename="avatar-roster-template.xlsx"`)
@@ -87,11 +88,11 @@ func (s *Service) importRoster(ctx context.Context, c identity.CurrentAdmin, hea
 		return nil, avatarError(400, "AVATAR_ROSTER_FILE_INVALID", "名单文件为空", nil)
 	}
 	rows, e := book.GetRows(sheets[0])
-	if e != nil || len(rows) < 1 || len(rows[0]) < 3 || strings.TrimSpace(rows[0][0]) != "姓名" || strings.TrimSpace(rows[0][1]) != "手机号" || strings.TrimSpace(rows[0][2]) != "性别" {
-		_ = s.failBatch(ctx, batchID, "HEADER_INVALID", "表头必须为：姓名、手机号、性别")
-		return nil, avatarError(400, "AVATAR_ROSTER_HEADER_INVALID", "表头必须为：姓名、手机号、性别", nil)
+	if e != nil || len(rows) < 1 || len(rows[0]) < 4 || strings.TrimSpace(rows[0][0]) != "姓名" || strings.TrimSpace(rows[0][1]) != "身份证号" || strings.TrimSpace(rows[0][2]) != "手机号" || strings.TrimSpace(rows[0][3]) != "性别" {
+		_ = s.failBatch(ctx, batchID, "HEADER_INVALID", "表头必须为：姓名、身份证号、手机号、性别")
+		return nil, avatarError(400, "AVATAR_ROSTER_HEADER_INVALID", "表头必须为：姓名、身份证号、手机号、性别", nil)
 	}
-	seen := map[string]bool{}
+	seenMobile, seenID := map[string]bool{}, map[string]bool{}
 	total, success, failed := 0, 0, 0
 	errors := make([]map[string]any, 0)
 	for i, row := range rows[1:] {
@@ -100,27 +101,31 @@ func (s *Service) importRoster(ctx context.Context, c identity.CurrentAdmin, hea
 			continue
 		}
 		total++
-		var name, mobile, gender string
+		var name, idNumber, mobile, gender string
 		if len(row) > 0 {
 			name = strings.TrimSpace(row[0])
 		}
 		if len(row) > 1 {
-			mobile = strings.TrimSpace(row[1])
+			idNumber = strings.ToUpper(strings.TrimSpace(row[1]))
 		}
 		if len(row) > 2 {
-			gender = normalizeGender(row[2])
+			mobile = strings.TrimSpace(row[2])
+		}
+		if len(row) > 3 {
+			gender = normalizeGender(row[3])
 		}
 		code, msg := "", ""
-		if name == "" || !mobilePattern.MatchString(mobile) || gender == "" {
-			code, msg = "VALIDATION_ROW_INVALID", "姓名、11位手机号和性别（男/女）均为必填"
-		} else if seen[mobile] {
-			code, msg = "DUPLICATE_IN_FILE", "同一文件内手机号重复"
+		idHash := hash(idNumber)
+		if name == "" || !validChineseIDNumber(idNumber) || !mobilePattern.MatchString(mobile) || gender == "" {
+			code, msg = "VALIDATION_ROW_INVALID", "姓名、有效身份证号、11位手机号和性别（男/女）均为必填"
+		} else if seenMobile[mobile] || seenID[idHash] {
+			code, msg = "DUPLICATE_IN_FILE", "同一文件内手机号或身份证号重复"
 		} else {
-			seen[mobile] = true
+			seenMobile[mobile], seenID[idHash] = true, true
 			var count int64
-			s.db.WithContext(ctx).Table("avatar_roster_member").Where("city_org_id=? AND mobile_hash=? AND status='ACTIVE'", cityID, hash(mobile)).Count(&count)
+			s.db.WithContext(ctx).Table("avatar_roster_member").Where("city_org_id=? AND (mobile_hash=? OR id_number_hash=?) AND status IN ('PENDING_IDENTITY','ACTIVE')", cityID, hash(mobile), idHash).Count(&count)
 			if count > 0 {
-				code, msg = "DUPLICATE_IN_CITY", "本城市已存在有效名单手机号"
+				code, msg = "DUPLICATE_IN_CITY", "本城市已存在有效名单人员"
 			}
 		}
 		if code != "" {
@@ -129,7 +134,7 @@ func (s *Service) importRoster(ctx context.Context, c identity.CurrentAdmin, hea
 			continue
 		}
 		memberID := idgen.Next()
-		e = s.db.WithContext(ctx).Table("avatar_roster_member").Create(map[string]any{"id": memberID, "status": "ACTIVE", "version": 1, "roster_batch_id": batchID, "city_org_id": cityID, "city_code": cityCode, "person_no": fmt.Sprintf("AVRM-%d", memberID), "person_type": "PROFESSIONAL_MODEL", "name_cipher": mustEncrypt(s.auth.JWTSecret, name), "name_hash": hash(name), "mobile_cipher": mustEncrypt(s.auth.JWTSecret, mobile), "mobile_hash": hash(mobile), "mobile_masked": maskMobile(mobile), "gender": gender, "registration_status": "PENDING", "created_by": c.UserID, "status_changed_at": now, "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(c.UserID)}).Error
+		e = s.db.WithContext(ctx).Table("avatar_roster_member").Create(map[string]any{"id": memberID, "status": "PENDING_IDENTITY", "version": 1, "roster_batch_id": batchID, "city_org_id": cityID, "city_code": cityCode, "person_no": fmt.Sprintf("AVRM-%d", memberID), "person_type": "PROFESSIONAL_MODEL", "name_cipher": mustEncrypt(s.auth.JWTSecret, name), "name_hash": hash(name), "id_number_cipher": mustEncrypt(s.auth.JWTSecret, idNumber), "id_number_hash": idHash, "id_number_last4": idNumber[len(idNumber)-4:], "mobile_cipher": mustEncrypt(s.auth.JWTSecret, mobile), "mobile_hash": hash(mobile), "mobile_masked": maskMobile(mobile), "gender": gender, "registration_status": "PENDING", "created_by": c.UserID, "status_changed_at": now, "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(c.UserID)}).Error
 		if e != nil {
 			failed++
 			errors = append(errors, map[string]any{"id": idgen.Next(), "roster_batch_id": batchID, "row_no": line, "error_code": "ROW_INSERT_FAILED", "error_message": "该行无法入库，请核对重复数据"})
@@ -140,16 +145,13 @@ func (s *Service) importRoster(ctx context.Context, c identity.CurrentAdmin, hea
 	if len(errors) > 0 {
 		_ = s.db.WithContext(ctx).Table("avatar_roster_import_error").CreateInBatches(errors, 500).Error
 	}
-	status := "COMPLETED"
-	if failed > 0 && success > 0 {
-		status = "PARTIAL_FAILED"
-	}
-	if failed > 0 && success == 0 {
+	status := "PENDING_IDENTITY"
+	if success == 0 {
 		status = "FAILED"
 	}
 	summary := fmt.Sprintf(`{"errorCount":%d}`, failed)
-	_ = s.db.WithContext(ctx).Table("avatar_roster_batch").Where("id=?", batchID).Updates(map[string]any{"status": status, "total_count": total, "success_count": success, "failed_count": failed, "error_summary_json": summary, "imported_at": time.Now(), "updated_at": time.Now(), "status_changed_at": time.Now(), "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(c.UserID)}).Error
-	return gin.H{"batchId": fmt.Sprint(batchID), "status": status, "totalCount": total, "successCount": success, "failedCount": failed}, nil
+	_ = s.db.WithContext(ctx).Table("avatar_roster_batch").Where("id=?", batchID).Updates(map[string]any{"status": status, "total_count": total, "success_count": 0, "failed_count": failed, "error_summary_json": summary, "imported_at": time.Now(), "updated_at": time.Now(), "status_changed_at": time.Now(), "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(c.UserID)}).Error
+	return gin.H{"batchId": fmt.Sprint(batchID), "status": status, "totalCount": total, "pendingIdentityCount": success, "successCount": 0, "failedCount": failed}, nil
 }
 func normalizeGender(v string) string {
 	switch strings.ToUpper(strings.TrimSpace(v)) {

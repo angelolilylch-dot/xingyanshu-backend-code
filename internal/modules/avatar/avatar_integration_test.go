@@ -402,9 +402,9 @@ func TestAvatarCityOperationsWithMySQL(t *testing.T) {
 	})
 	x := excelize.NewFile()
 	sheet := x.GetSheetName(0)
-	_ = x.SetSheetRow(sheet, "A1", &[]any{"姓名", "手机号", "性别"})
-	_ = x.SetSheetRow(sheet, "A2", &[]any{"测试甲", "13900000101", "男"})
-	_ = x.SetSheetRow(sheet, "A3", &[]any{"测试乙", "13900000101", "女"})
+	_ = x.SetSheetRow(sheet, "A1", &[]any{"姓名", "身份证号", "手机号", "性别"})
+	_ = x.SetSheetRow(sheet, "A2", &[]any{"测试甲", "11010519491231002X", "13900000101", "男"})
+	_ = x.SetSheetRow(sheet, "A3", &[]any{"测试乙", "11010519491231003X", "13900000101", "女"})
 	raw, err := x.WriteToBuffer()
 	must(t, err)
 	x.Close()
@@ -435,8 +435,25 @@ func TestAvatarCityOperationsWithMySQL(t *testing.T) {
 		SuccessCount, FailedCount int
 	}
 	must(t, db.Table("avatar_roster_batch").Select("status,success_count,failed_count").Where("id=?", batchID).Take(&result).Error)
-	if result.Status != "PARTIAL_FAILED" || result.SuccessCount != 1 || result.FailedCount != 1 {
+	if result.Status != "PENDING_IDENTITY" || result.SuccessCount != 0 || result.FailedCount != 1 {
 		t.Fatalf("batch=%+v", result)
+	}
+	processed, err := s.ProcessPendingRosterIdentity(t.Context(), 10)
+	must(t, err)
+	if processed != 1 {
+		t.Fatalf("identity processed=%d", processed)
+	}
+	must(t, db.Table("avatar_roster_batch").Select("status,success_count,failed_count").Where("id=?", batchID).Take(&result).Error)
+	if result.Status != "PARTIAL_FAILED" || result.SuccessCount != 1 || result.FailedCount != 1 {
+		t.Fatalf("verified batch=%+v", result)
+	}
+	var verified struct {
+		Status, IdentityProviderCode string
+		IDNumberCipher               []byte
+	}
+	must(t, db.Table("avatar_roster_member").Select("status,identity_provider_code,id_number_cipher").Where("roster_batch_id=?", batchID).Take(&verified).Error)
+	if verified.Status != "ACTIVE" || verified.IdentityProviderCode != "MOCK" || len(verified.IDNumberCipher) == 0 || bytes.Contains(verified.IDNumberCipher, []byte("11010519491231002X")) {
+		t.Fatalf("verified roster identity=%+v", verified)
 	}
 	batchDetail, ae := s.rosterBatchDetail(t.Context(), admin, fmt.Sprint(batchID))
 	if ae != nil || fmt.Sprint(batchDetail.(map[string]any)["status"]) != "PARTIAL_FAILED" {

@@ -36,6 +36,7 @@ type Config struct {
 // not a credential, and is returned only when a registration QR code is invalid.
 type AvatarConfig struct {
 	FallbackSupportPhone     string        `yaml:"fallback_support_phone"`
+	RosterIdentityProvider   string        `yaml:"roster_identity_provider"`
 	SMSResendInterval        time.Duration `yaml:"sms_resend_interval"`
 	SMSDailyLimit            int           `yaml:"sms_daily_limit"`
 	UploadCredentialParallel int           `yaml:"upload_credential_parallel"`
@@ -264,6 +265,9 @@ func (c Config) Validate() error {
 		}
 		if c.Avatar.FallbackSupportPhone == "" {
 			return fmt.Errorf("avatar.fallback_support_phone is required in production")
+		}
+		if c.Avatar.RosterIdentityProvider == "" || c.Avatar.RosterIdentityProvider == "mock" {
+			return fmt.Errorf("avatar.roster_identity_provider must be a real provider in production")
 		}
 	}
 	if c.Bootstrap.PlatformOrgName == "" || c.Bootstrap.InitialAdmin.Username == "" || c.Bootstrap.InitialAdmin.Password == "" || c.Bootstrap.InitialAdmin.DisplayName == "" {

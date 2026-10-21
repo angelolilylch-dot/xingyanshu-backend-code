@@ -42,6 +42,7 @@ type Service struct {
 	environment string
 	storage     filestore.Storage
 	settings    config.AvatarConfig
+	rosterIDV   rosterIdentityVerifier
 }
 type Current struct{ AccountID, SessionID uint64 }
 
@@ -145,7 +146,7 @@ func NewService(db *gorm.DB, r *redis.Client, auth config.AuthConfig, environmen
 
 func NewServiceWithConfig(db *gorm.DB, r *redis.Client, auth config.AuthConfig, environment string, settings config.AvatarConfig, storage ...filestore.Storage) *Service {
 	settings = config.NormalizeAvatarConfig(settings)
-	s := &Service{db: db, redis: r, auth: auth, environment: environment, settings: settings}
+	s := &Service{db: db, redis: r, auth: auth, environment: environment, settings: settings, rosterIDV: newRosterIdentityVerifier(environment, settings.RosterIdentityProvider)}
 	if len(storage) > 0 {
 		s.storage = storage[0]
 	}
