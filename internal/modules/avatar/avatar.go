@@ -483,6 +483,15 @@ func RegisterAdminRoutes(group *gin.RouterGroup, s *Service, middleware gin.Hand
 		}
 		httpx.Success(c, http.StatusOK, data)
 	})
+	admin.POST("/roster-batches/:id/identity-verifications/run", func(c *gin.Context) {
+		current, _ := identity.CurrentAdminFromContext(c)
+		data, e := s.runRosterBatchIdentity(c.Request.Context(), current, c.Param("id"))
+		if e != nil {
+			httpx.AbortWithError(c, e)
+			return
+		}
+		httpx.Success(c, http.StatusOK, data)
+	})
 	admin.GET("/roster-batches/:id/errors", s.rosterErrorReceipt)
 	admin.GET("/roster-members", func(c *gin.Context) {
 		current, _ := identity.CurrentAdminFromContext(c)

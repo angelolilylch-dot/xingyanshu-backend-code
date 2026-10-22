@@ -8,7 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"xingyanshu-backend/internal/modules/identity"
+	"xingyanshu-backend/internal/platform/httpx"
 	"xingyanshu-backend/internal/platform/idgen"
 )
 
@@ -94,6 +97,52 @@ func (s *Service) ProcessPendingRosterIdentity(ctx context.Context, limit int) (
 		processed++
 	}
 	return processed, nil
+}
+
+// runRosterBatchIdentity is the controlled operator action for a single
+// imported batch. It intentionally selects only PENDING_IDENTITY members, so
+// repeated clicks never re-verify completed or rejected records.
+func (s *Service) runRosterBatchIdentity(ctx context.Context, c identity.CurrentAdmin, idText string) (any, *httpx.AppError) {
+	cityID, _, ae := cityOperator(c, "AVATAR_ROSTER_MANAGE")
+	if ae != nil {
+		return nil, ae
+	}
+	batchID, ok := parseUint(idText)
+	if !ok {
+		return nil, avatarError(400, "VALIDATION_FORMAT_INVALID", "导入批次编号不正确", nil)
+	}
+	if _, unavailable := s.rosterIDV.(unavailableRosterIdentityVerifier); unavailable {
+		return nil, avatarError(503, "AVATAR_IDENTITY_PROVIDER_NOT_CONFIGURED", "实名核验服务暂不可用", nil)
+	}
+	var batch struct{ ID uint64 }
+	if e := s.db.WithContext(ctx).Table("avatar_roster_batch").Select("id").Where("id=? AND city_org_id=?", batchID, cityID).Take(&batch).Error; e != nil {
+		return nil, avatarError(404, "AVATAR_ROSTER_BATCH_NOT_FOUND", "导入批次不存在", nil)
+	}
+	var rows []struct {
+		ID, RosterBatchID                        uint64
+		NameCipher, IDNumberCipher, MobileCipher []byte
+	}
+	if e := s.db.WithContext(ctx).Table("avatar_roster_member").Select("id,roster_batch_id,name_cipher,id_number_cipher,mobile_cipher").Where("roster_batch_id=? AND status='PENDING_IDENTITY'", batchID).Order("created_at ASC").Find(&rows).Error; e != nil {
+		return nil, avatarError(500, "INTERNAL_ERROR", "查询待核验名单失败", nil)
+	}
+	processed := 0
+	for _, row := range rows {
+		if e := s.processPendingRosterIdentity(ctx, row); e != nil {
+			return nil, avatarError(500, "INTERNAL_ERROR", "执行名单实名核验失败", nil)
+		}
+		processed++
+	}
+	if e := s.refreshRosterBatchIdentityStatus(ctx, batchID); e != nil {
+		return nil, avatarError(500, "INTERNAL_ERROR", "更新核验批次状态失败", nil)
+	}
+	var result struct {
+		Status                    string
+		SuccessCount, FailedCount int
+	}
+	if e := s.db.WithContext(ctx).Table("avatar_roster_batch").Select("status,success_count,failed_count").Where("id=?", batchID).Take(&result).Error; e != nil {
+		return nil, avatarError(500, "INTERNAL_ERROR", "查询核验结果失败", nil)
+	}
+	return gin.H{"batchId": fmt.Sprint(batchID), "processedCount": processed, "status": result.Status, "successCount": result.SuccessCount, "failedCount": result.FailedCount}, nil
 }
 
 func (s *Service) processPendingRosterIdentity(ctx context.Context, row struct {

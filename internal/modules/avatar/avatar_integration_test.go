@@ -453,10 +453,13 @@ func TestAvatarCityOperationsWithMySQL(t *testing.T) {
 	if result.Status != "PENDING_IDENTITY" || result.SuccessCount != 0 || result.FailedCount != 1 {
 		t.Fatalf("batch=%+v", result)
 	}
-	processed, err := s.ProcessPendingRosterIdentity(t.Context(), 10)
-	must(t, err)
-	if processed != 1 {
-		t.Fatalf("identity processed=%d", processed)
+	verification, ae := s.runRosterBatchIdentity(t.Context(), admin, fmt.Sprint(batchID))
+	if ae != nil || verification.(gin.H)["processedCount"] != 1 || verification.(gin.H)["status"] != "PARTIAL_FAILED" {
+		t.Fatalf("manual identity verification=%+v err=%+v", verification, ae)
+	}
+	replayVerification, ae := s.runRosterBatchIdentity(t.Context(), admin, fmt.Sprint(batchID))
+	if ae != nil || replayVerification.(gin.H)["processedCount"] != 0 || replayVerification.(gin.H)["status"] != "PARTIAL_FAILED" {
+		t.Fatalf("manual identity verification replay=%+v err=%+v", replayVerification, ae)
 	}
 	must(t, db.Table("avatar_roster_batch").Select("status,success_count,failed_count").Where("id=?", batchID).Take(&result).Error)
 	if result.Status != "PARTIAL_FAILED" || result.SuccessCount != 1 || result.FailedCount != 1 {

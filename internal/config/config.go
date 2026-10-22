@@ -177,6 +177,20 @@ func normalizeLoggingConfig(value LoggingConfig, environment string) LoggingConf
 
 // expandEnvironment 允许本机环境变量填入第三方凭据，避免把密钥提交到配置模板。
 func expandEnvironment(cfg *Config) {
+	// Test and deployment credentials may be injected by the process environment.
+	// These overrides deliberately never write values back into YAML templates.
+	if value := strings.TrimSpace(os.Getenv("XINGYANSHU_DB_HOST")); value != "" {
+		cfg.Database.Host = value
+	}
+	if value := strings.TrimSpace(os.Getenv("XINGYANSHU_DB_NAME")); value != "" {
+		cfg.Database.Name = value
+	}
+	if value := strings.TrimSpace(os.Getenv("XINGYANSHU_DB_USERNAME")); value != "" {
+		cfg.Database.Username = value
+	}
+	if value := os.Getenv("XINGYANSHU_DB_PASSWORD"); value != "" {
+		cfg.Database.Password = value
+	}
 	file := &cfg.File
 	file.Storage.COS.BucketURL = os.ExpandEnv(file.Storage.COS.BucketURL)
 	file.Storage.COS.SecretID = os.ExpandEnv(file.Storage.COS.SecretID)

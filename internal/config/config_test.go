@@ -25,6 +25,25 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+func TestLoadAppliesDatabaseEnvironmentOverrides(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.yaml")
+	content := []byte("app:\n  name: xingyanshu\n  environment: test\n  server:\n    address: ':8080'\n  worker:\n    poll_interval: 5s\ndatabase:\n  driver: mysql\n  host: 127.0.0.1\n  port: 3306\n  name: local\nredis:\n  address: 127.0.0.1:6379\nauth:\n  jwt_secret: test_secret\n  access_token_ttl: 2h\n  refresh_token_ttl: 168h\nfile:\n  storage:\n    provider: cos\n    key_prefix: test\n    cos:\n      bucket_url: https://test-0.cos.ap-guangzhou.myqcloud.com\n      secret_id: test-id\n      secret_key: test-key\nbootstrap:\n  platform_org_name: 测试平台\n  initial_admin:\n    username: test_admin\n    password: Admin@123456\n    display_name: 测试管理员\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XINGYANSHU_DB_HOST", "db.test.internal")
+	t.Setenv("XINGYANSHU_DB_NAME", "remote_test")
+	t.Setenv("XINGYANSHU_DB_USERNAME", "remote_user")
+	t.Setenv("XINGYANSHU_DB_PASSWORD", "test-password")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Database.Host != "db.test.internal" || cfg.Database.Name != "remote_test" || cfg.Database.Username != "remote_user" || cfg.Database.Password != "test-password" {
+		t.Fatalf("database environment overrides not applied")
+	}
+}
+
 // TestContentSafetyConfigRejectsPartialCredentials 防止误填一半密钥后运行时静默跳过真实文本审核。
 func TestContentSafetyConfigRejectsPartialCredentials(t *testing.T) {
 	cfg := validTestConfig()
