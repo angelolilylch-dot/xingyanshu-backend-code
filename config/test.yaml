@@ -1,6 +1,7 @@
 app:
   name: xingyanshu-backend
   environment: test
+  # 后端接口联调基准：http://101.43.49.193:8090（远端服务，不是本机监听地址）。
   server:
     address: ":8080"
   worker:
@@ -13,11 +14,12 @@ logging:
 
 database:
   driver: mysql
-  host: 127.0.0.1
+  # 固定使用远程测试库；账号和密码只从本机环境变量读取，禁止写入仓库。
+  host: 101.43.49.193
   port: 3306
   name: xingyanshu_test
-  username: root
-  password: root
+  username: ${XINGYANSHU_DB_USERNAME}
+  password: ${XINGYANSHU_DB_PASSWORD}
 
 redis:
   address: 127.0.0.1:6379

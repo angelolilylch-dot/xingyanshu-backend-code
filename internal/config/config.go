@@ -179,6 +179,10 @@ func normalizeLoggingConfig(value LoggingConfig, environment string) LoggingConf
 func expandEnvironment(cfg *Config) {
 	// Test and deployment credentials may be injected by the process environment.
 	// These overrides deliberately never write values back into YAML templates.
+	cfg.Database.Host = os.ExpandEnv(cfg.Database.Host)
+	cfg.Database.Name = os.ExpandEnv(cfg.Database.Name)
+	cfg.Database.Username = os.ExpandEnv(cfg.Database.Username)
+	cfg.Database.Password = os.ExpandEnv(cfg.Database.Password)
 	if value := strings.TrimSpace(os.Getenv("XINGYANSHU_DB_HOST")); value != "" {
 		cfg.Database.Host = value
 	}
