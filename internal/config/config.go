@@ -109,10 +109,11 @@ type FileConfig struct {
 
 // FileStorageConfig 定义 Mock 或 COS 存储实现的连接参数；COS 凭据只能存于本地私有配置。
 type FileStorageConfig struct {
-	Provider  string        `yaml:"provider"`
-	LocalRoot string        `yaml:"local_root"`
-	KeyPrefix string        `yaml:"key_prefix"`
-	COS       COSFileConfig `yaml:"cos"`
+	Provider          string        `yaml:"provider"`
+	LocalRoot         string        `yaml:"local_root"`
+	MockUploadBaseURL string        `yaml:"mock_upload_base_url"`
+	KeyPrefix         string        `yaml:"key_prefix"`
+	COS               COSFileConfig `yaml:"cos"`
 }
 
 type COSFileConfig struct {
@@ -185,7 +186,7 @@ func expandEnvironment(cfg *Config) {
 	cfg.Evidence.CallbackSecret = os.ExpandEnv(cfg.Evidence.CallbackSecret)
 }
 
-// DefaultFileConfig 给未显式配置的测试环境提供安全的 Mock 存储与一期上传限制。
+// DefaultFileConfig 提供 COS 存储与一期上传限制的默认值。
 func DefaultFileConfig() FileConfig {
 	return FileConfig{
 		Storage: FileStorageConfig{Provider: "cos", KeyPrefix: "xingyanshu/test"},
@@ -279,8 +280,8 @@ func (c Config) Validate() error {
 	if c.Bootstrap.PlatformOrgName == "" || c.Bootstrap.InitialAdmin.Username == "" || c.Bootstrap.InitialAdmin.Password == "" || c.Bootstrap.InitialAdmin.DisplayName == "" {
 		return fmt.Errorf("bootstrap.platform_org_name and bootstrap.initial_admin fields are required")
 	}
-	if c.File.Storage.Provider != "cos" {
-		return fmt.Errorf("file.storage.provider must be cos")
+	if c.File.Storage.Provider != "cos" && c.File.Storage.Provider != "mock" {
+		return fmt.Errorf("file.storage.provider must be cos or mock")
 	}
 	if c.File.Storage.KeyPrefix == "" || c.File.SignedURLTTL <= 0 || c.File.WatchInterval <= 0 {
 		return fmt.Errorf("file storage key_prefix, signed_url_ttl and watch_interval are required")
@@ -290,10 +291,18 @@ func (c Config) Validate() error {
 			return fmt.Errorf("file policy extensions and max_size_mb must be positive")
 		}
 	}
-	cos := c.File.Storage.COS
-	// 当前文件服务只支持 COS。启动前完整校验连接信息，避免服务启动到一半才因空 Bucket 地址失败。
-	if cos.BucketURL == "" || cos.SecretID == "" || cos.SecretKey == "" {
-		return fmt.Errorf("file.storage.cos bucket_url, secret_id and secret_key are required when provider is cos")
+	if c.File.Storage.Provider == "cos" {
+		cos := c.File.Storage.COS
+		if cos.BucketURL == "" || cos.SecretID == "" || cos.SecretKey == "" {
+			return fmt.Errorf("file.storage.cos bucket_url, secret_id and secret_key are required when provider is cos")
+		}
+	} else {
+		if c.App.Environment != "test" {
+			return fmt.Errorf("file.storage.provider mock is only allowed in test environment")
+		}
+		if strings.TrimSpace(c.File.Storage.LocalRoot) == "" || !isAbsoluteHTTPURL(c.File.Storage.MockUploadBaseURL) {
+			return fmt.Errorf("file.storage.local_root and mock_upload_base_url are required when provider is mock")
+		}
 	}
 	if c.ContentSafety.Provider != "" && c.ContentSafety.Provider != "tencent_tms" && c.ContentSafety.Provider != "mock" {
 		return fmt.Errorf("content_safety.provider must be tencent_tms or mock when configured")
@@ -319,11 +328,15 @@ func (c Config) Validate() error {
 }
 
 func validateAvatarRegistrationH5URL(value string) error {
-	u, err := url.ParseRequestURI(strings.TrimSpace(value))
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	if !isAbsoluteHTTPURL(value) {
 		return fmt.Errorf("avatar.registration_h5_url must be an absolute http or https URL in production")
 	}
 	return nil
+}
+
+func isAbsoluteHTTPURL(value string) bool {
+	u, err := url.ParseRequestURI(strings.TrimSpace(value))
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
 // contentSafetyConfigured 判断是否已开始填写腾讯云审核配置，避免配置半成品时静默降级为未启用。

@@ -59,12 +59,11 @@ avatar:
 
 file:
   storage:
-    provider: cos
+    # 本地 H5 联调使用后端 Mock 直传，不依赖 COS 跨域配置；仅允许 test 环境。
+    provider: mock
+    local_root: .runtime/mock-storage
+    mock_upload_base_url: http://127.0.0.1:8080
     key_prefix: xingyanshu/test
-    cos:
-      bucket_url: https://testxingyanshu1-1331209793.cos.ap-guangzhou.myqcloud.com
-      secret_id:${XINGYANSHU_REDACTED_SECRET_ID}
-      secret_key:${XINGYANSHU_REDACTED_SECRET_KEY}
   signed_url_ttl: 10m
   watch_interval: 2s
   policy:

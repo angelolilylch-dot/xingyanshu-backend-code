@@ -6,3 +6,4 @@ config/*.local.yaml
 bin/
 node_modules/
 xingyanshu.exe
+.runtime/

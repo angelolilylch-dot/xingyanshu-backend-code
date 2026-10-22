@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -78,6 +79,7 @@ func RunServer(cfg config.Config, configPath string) error {
 	activityService := activities.NewService(db, contentmoderation.NewProvider(cfg.ContentSafety))
 	avatarService := avatar.NewServiceWithConfig(db, redisClient, cfg.Auth, cfg.App.Environment, cfg.Avatar, storage)
 	apiGroup := router.Group("/api/v1")
+	registerMockStorageRoutes(apiGroup, storage)
 	identity.RegisterPublicRoutes(apiGroup, captchaService, loginService)
 	identity.RegisterUnifiedRoutes(apiGroup, db, cfg.Auth, loginService)
 	identity.RegisterConsumerRoutes(apiGroup, loginService, identity.RequireConsumerAuthentication(db, cfg.Auth))
@@ -104,6 +106,39 @@ func RunServer(cfg config.Config, configPath string) error {
 
 	log.Printf("server starting: environment=%s address=%s", cfg.App.Environment, cfg.App.Server.Address)
 	return router.Run(cfg.App.Server.Address)
+}
+
+func registerMockStorageRoutes(api *gin.RouterGroup, storage filestore.Storage) {
+	mock, ok := storage.(filestore.MockHTTPStorage)
+	if !ok {
+		return
+	}
+	api.PUT("/mock-storage/upload", func(c *gin.Context) {
+		key := c.Query("key")
+		if key == "" {
+			c.Status(http.StatusBadRequest)
+			return
+		}
+		if err := mock.PutMockUpload(c.Request.Context(), key, c.GetHeader("Content-Type"), c.Request.Body); err != nil {
+			c.Status(http.StatusBadRequest)
+			return
+		}
+		c.Status(http.StatusNoContent)
+	})
+	api.GET("/mock-storage/download", func(c *gin.Context) {
+		key := c.Query("key")
+		if key == "" {
+			c.Status(http.StatusBadRequest)
+			return
+		}
+		body, err := mock.Get(c.Request.Context(), key)
+		if err != nil {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		defer body.Close()
+		c.DataFromReader(http.StatusOK, -1, "application/octet-stream", body, nil)
+	})
 }
 
 func RunWorker(cfg config.Config) error {

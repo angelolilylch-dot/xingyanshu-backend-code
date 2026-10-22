@@ -46,6 +46,18 @@ func TestContentSafetyMockOnlyAllowedInTest(t *testing.T) {
 	}
 }
 
+func TestFileStorageMockOnlyAllowedInTest(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.File.Storage = FileStorageConfig{Provider: "mock", KeyPrefix: "xingyanshu/test", LocalRoot: t.TempDir(), MockUploadBaseURL: "http://127.0.0.1:8080"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("mock storage should be valid in test: %v", err)
+	}
+	cfg.App.Environment = "production"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("mock storage must be rejected outside test")
+	}
+}
+
 func validTestConfig() Config {
 	var cfg Config
 	cfg.App.Name = "xingyanshu"
