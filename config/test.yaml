@@ -37,8 +37,8 @@ content_safety:
   provider: tencent_tms
   region: ap-guangzhou
   biz_type: ip_center
-  secret_id:${XINGYANSHU_REDACTED_SECRET_ID}
-  secret_key:${XINGYANSHU_REDACTED_SECRET_KEY}
+  secret_id: ${XINGYANSHU_TMS_SECRET_ID}
+  secret_key: ${XINGYANSHU_TMS_SECRET_KEY}
   timeout: 10s
 
 evidence:
