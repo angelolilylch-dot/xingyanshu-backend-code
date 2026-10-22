@@ -1016,7 +1016,7 @@ func (s *Service) confirmBinding(ctx context.Context, cur Current, r bindingRequ
 		return nil, s.invalidQRCodeError()
 	}
 	if err == errMismatch {
-		return nil, s.matchFailure(ctx, r.RegistrationCode)
+		return nil, s.matchFailure(ctx, r.RegistrationCode, r.Name, r.Gender, cur)
 	}
 	if err == errBound {
 		return nil, avatarError(409, "AVATAR_ROSTER_ALREADY_BOUND", "该名单已绑定，请联系城市运营方", nil)
@@ -1031,8 +1031,46 @@ var errQRCode = fmt.Errorf("qrcode")
 var errMismatch = fmt.Errorf("mismatch")
 var errBound = fmt.Errorf("bound")
 
-func (s *Service) matchFailure(ctx context.Context, code string) *httpx.AppError {
-	return avatarError(422, "AVATAR_ROSTER_MATCH_NOT_FOUND", "暂时无法完成建档，请联系客服核实导入信息。", gin.H{"supportPhone": strings.TrimSpace(s.settings.FallbackSupportPhone)})
+func (s *Service) matchFailure(ctx context.Context, code, name, gender string, cur Current) *httpx.AppError {
+	phone := strings.TrimSpace(s.settings.FallbackSupportPhone)
+	var q struct{ CityOrgID uint64 }
+	var account struct{ MobileHash string }
+	if s.db.WithContext(ctx).Table("avatar_registration_qrcode").Select("city_org_id").Where("code_hash=?", hash(code)).Take(&q).Error != nil || s.db.WithContext(ctx).Table("avatar_h5_account").Select("mobile_hash").Where("id=?", cur.AccountID).Take(&account).Error != nil {
+		return avatarDetailedError("AVATAR_ROSTER_MATCH_NOT_FOUND", "未找到可绑定的名单，请核对姓名和手机号后重试", "ROSTER_NOT_FOUND", "请确认姓名和手机号与导入名单完全一致", phone, nil)
+	}
+	var member struct{ Status, Gender string }
+	if e := s.db.WithContext(ctx).Table("avatar_roster_member").Select("status,gender").Where("city_org_id=? AND name_hash=? AND mobile_hash=?", q.CityOrgID, hash(name), account.MobileHash).Order("created_at DESC").Take(&member).Error; e == nil {
+		switch member.Status {
+		case "PENDING_IDENTITY":
+			return avatarDetailedError("AVATAR_ROSTER_IDENTITY_PENDING", "名单正在实名核验，暂不能绑定", "ROSTER_IDENTITY_PENDING", "请稍后重试，或联系400客服查询核验进度", phone, nil)
+		case "INACTIVE":
+			return avatarDetailedError("AVATAR_ROSTER_IDENTITY_REJECTED", "名单实名核验未通过，暂不能绑定", "ROSTER_IDENTITY_REJECTED", "请联系400客服核对姓名、身份证号和手机号", phone, nil)
+		case "ACTIVE":
+			if member.Gender != gender {
+				return avatarDetailedError("AVATAR_ROSTER_GENDER_MISMATCH", "性别与导入名单不一致", "GENDER_MISMATCH", "请按导入名单选择正确性别", phone, []httpx.FieldError{{Field: "gender", Message: "与导入名单不一致"}})
+			}
+		}
+	}
+	var count int64
+	_ = s.db.WithContext(ctx).Table("avatar_roster_member").Where("city_org_id=? AND mobile_hash=?", q.CityOrgID, account.MobileHash).Count(&count).Error
+	if count > 0 {
+		return avatarDetailedError("AVATAR_ROSTER_NAME_MISMATCH", "姓名与该手机号的导入名单不一致", "NAME_MISMATCH", "请填写导入名单中的实名姓名", phone, []httpx.FieldError{{Field: "name", Message: "与导入名单不一致"}})
+	}
+	_ = s.db.WithContext(ctx).Table("avatar_roster_member").Where("city_org_id=? AND name_hash=?", q.CityOrgID, hash(name)).Count(&count).Error
+	if count > 0 {
+		return avatarDetailedError("AVATAR_ROSTER_MOBILE_MISMATCH", "手机号与该姓名的导入名单不一致", "MOBILE_MISMATCH", "请使用导入名单中的手机号登录", phone, []httpx.FieldError{{Field: "mobile", Message: "与导入名单不一致"}})
+	}
+	var importError struct{ ErrorCode, ErrorMessage string }
+	if e := s.db.WithContext(ctx).Table("avatar_roster_import_error e").Joins("JOIN avatar_roster_batch b ON b.id=e.roster_batch_id").Select("e.error_code,e.error_message").Where("b.city_org_id=? AND e.name_hash=? AND e.mobile_hash=?", q.CityOrgID, hash(name), account.MobileHash).Order("e.created_at DESC").Take(&importError).Error; e == nil {
+		return avatarDetailedError("AVATAR_ROSTER_IMPORT_INVALID", "名单导入数据不符合要求，暂不能绑定", importError.ErrorCode, importError.ErrorMessage, phone, nil)
+	}
+	return avatarDetailedError("AVATAR_ROSTER_MATCH_NOT_FOUND", "未找到该姓名和手机号对应的导入名单", "ROSTER_NOT_FOUND", "请确认已由运营方导入名单，并核对姓名和手机号", phone, nil)
+}
+
+func avatarDetailedError(code, message, reasonCode, action, phone string, fields []httpx.FieldError) *httpx.AppError {
+	e := avatarError(http.StatusUnprocessableEntity, code, message, gin.H{"reasonCode": reasonCode, "action": action, "supportPhone": phone})
+	e.FieldErrors = fields
+	return e
 }
 
 func reject(c *gin.Context) {

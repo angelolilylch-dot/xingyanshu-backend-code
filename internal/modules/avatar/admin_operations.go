@@ -115,30 +115,30 @@ func (s *Service) importRoster(ctx context.Context, c identity.CurrentAdmin, hea
 		if len(row) > 3 {
 			gender = normalizeGender(row[3])
 		}
-		code, msg := "", ""
+		code := ""
 		idHash := hash(idNumber)
 		if name == "" || !validChineseIDNumber(idNumber) || !mobilePattern.MatchString(mobile) || gender == "" {
-			code, msg = "VALIDATION_ROW_INVALID", "姓名、有效身份证号、11位手机号和性别（男/女）均为必填"
+			code = "VALIDATION_ROW_INVALID"
 		} else if seenMobile[mobile] || seenID[idHash] {
-			code, msg = "DUPLICATE_IN_FILE", "同一文件内手机号或身份证号重复"
+			code = "DUPLICATE_IN_FILE"
 		} else {
 			seenMobile[mobile], seenID[idHash] = true, true
 			var count int64
 			s.db.WithContext(ctx).Table("avatar_roster_member").Where("city_org_id=? AND (mobile_hash=? OR id_number_hash=?) AND status IN ('PENDING_IDENTITY','ACTIVE')", cityID, hash(mobile), idHash).Count(&count)
 			if count > 0 {
-				code, msg = "DUPLICATE_IN_CITY", "本城市已存在有效名单人员"
+				code = "DUPLICATE_IN_CITY"
 			}
 		}
 		if code != "" {
 			failed++
-			errors = append(errors, map[string]any{"id": idgen.Next(), "roster_batch_id": batchID, "row_no": line, "error_code": code, "error_message": msg})
+			errors = append(errors, map[string]any{"id": idgen.Next(), "roster_batch_id": batchID, "row_no": line, "error_code": code, "error_message": detailedRosterImportMessage(code, name, idNumber, mobile, gender), "name_hash": hash(name), "mobile_hash": hash(mobile), "id_number_hash": idHash})
 			continue
 		}
 		memberID := idgen.Next()
 		e = s.db.WithContext(ctx).Table("avatar_roster_member").Create(map[string]any{"id": memberID, "status": "PENDING_IDENTITY", "version": 1, "roster_batch_id": batchID, "city_org_id": cityID, "city_code": cityCode, "person_no": fmt.Sprintf("AVRM-%d", memberID), "person_type": "PROFESSIONAL_MODEL", "name_cipher": mustEncrypt(s.auth.JWTSecret, name), "name_hash": hash(name), "id_number_cipher": mustEncrypt(s.auth.JWTSecret, idNumber), "id_number_hash": idHash, "id_number_last4": idNumber[len(idNumber)-4:], "mobile_cipher": mustEncrypt(s.auth.JWTSecret, mobile), "mobile_hash": hash(mobile), "mobile_masked": maskMobile(mobile), "gender": gender, "registration_status": "PENDING", "created_by": c.UserID, "status_changed_at": now, "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(c.UserID)}).Error
 		if e != nil {
 			failed++
-			errors = append(errors, map[string]any{"id": idgen.Next(), "roster_batch_id": batchID, "row_no": line, "error_code": "ROW_INSERT_FAILED", "error_message": "该行无法入库，请核对重复数据"})
+			errors = append(errors, map[string]any{"id": idgen.Next(), "roster_batch_id": batchID, "row_no": line, "error_code": "ROW_INSERT_FAILED", "error_message": "该行无法入库，请核对重复数据", "name_hash": hash(name), "mobile_hash": hash(mobile), "id_number_hash": idHash})
 			continue
 		}
 		success++
@@ -153,6 +153,33 @@ func (s *Service) importRoster(ctx context.Context, c identity.CurrentAdmin, hea
 	summary := fmt.Sprintf(`{"errorCount":%d}`, failed)
 	_ = s.db.WithContext(ctx).Table("avatar_roster_batch").Where("id=?", batchID).Updates(map[string]any{"status": status, "total_count": total, "success_count": 0, "failed_count": failed, "error_summary_json": summary, "imported_at": time.Now(), "updated_at": time.Now(), "status_changed_at": time.Now(), "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(c.UserID)}).Error
 	return gin.H{"batchId": fmt.Sprint(batchID), "status": status, "totalCount": total, "pendingIdentityCount": success, "successCount": 0, "failedCount": failed}, nil
+}
+
+func detailedRosterImportMessage(code, name, idNumber, mobile, gender string) string {
+	if code != "VALIDATION_ROW_INVALID" {
+		switch code {
+		case "DUPLICATE_IN_FILE":
+			return "同一文件内手机号或身份证号重复，请只保留一行"
+		case "DUPLICATE_IN_CITY":
+			return "本城市已存在该手机号或身份证号对应的有效名单，无需重复导入"
+		default:
+			return "该行无法入库，请核对重复数据"
+		}
+	}
+	issues := make([]string, 0, 4)
+	if name == "" {
+		issues = append(issues, "姓名不能为空")
+	}
+	if !validChineseIDNumber(idNumber) {
+		issues = append(issues, "身份证号格式或校验位不正确")
+	}
+	if !mobilePattern.MatchString(mobile) {
+		issues = append(issues, "手机号必须为11位中国大陆手机号")
+	}
+	if gender == "" {
+		issues = append(issues, "性别必须填写男或女")
+	}
+	return strings.Join(issues, "；")
 }
 func normalizeGender(v string) string {
 	switch strings.ToUpper(strings.TrimSpace(v)) {

@@ -207,7 +207,7 @@ func TestAvatarRegistrationHTTPWithMySQLRedis(t *testing.T) {
 		t.Fatalf("identity conflict=%+v", conflict)
 	}
 	mismatch := callAvatar(t, router, http.MethodPost, "/api/v1/avatar/roster-binding/confirm", gin.H{"registrationCode": code, "name": "不匹配姓名", "gender": "FEMALE"}, token)
-	if mismatch.Code != http.StatusUnprocessableEntity || !strings.Contains(mismatch.Body, `"code":"AVATAR_ROSTER_MATCH_NOT_FOUND"`) {
+	if mismatch.Code != http.StatusUnprocessableEntity || !strings.Contains(mismatch.Body, `"code":"AVATAR_ROSTER_NAME_MISMATCH"`) || !strings.Contains(mismatch.Body, `"reasonCode":"NAME_MISMATCH"`) || !strings.Contains(mismatch.Body, `"field":"name"`) {
 		t.Fatalf("mismatch=%+v", mismatch)
 	}
 	bound := callAvatar(t, router, http.MethodPost, "/api/v1/avatar/roster-binding/confirm", gin.H{"registrationCode": code, "name": name, "gender": "FEMALE"}, token)
