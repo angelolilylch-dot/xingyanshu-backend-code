@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/skip2/go-qrcode"
 	"github.com/xuri/excelize/v2"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"xingyanshu-backend/internal/modules/identity"
 	"xingyanshu-backend/internal/platform/httpx"
@@ -222,26 +224,79 @@ func (s *Service) createQRCode(ctx context.Context, c identity.CurrentAdmin) (an
 	if ae != nil {
 		return nil, ae
 	}
-	token, e := randomToken()
-	if e != nil {
-		return nil, avatarError(500, "INTERNAL_ERROR", "生成二维码失败", nil)
-	}
-	id := idgen.Next()
-	now := time.Now()
-	e = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if e := tx.Table("avatar_registration_qrcode").Where("city_org_id=? AND status='ACTIVE'", city).Updates(map[string]any{"status": "REVOKED", "updated_at": now}).Error; e != nil {
-			return e
+	var row registrationQRCode
+	created := false
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("avatar_registration_qrcode").Select("id,qrcode_no,status,scan_count,expires_at,created_at,updated_at,code_cipher").Where("city_org_id=? AND status IN ('ACTIVE','PAUSED')", city).Order("created_at DESC").Take(&row).Error
+		if err == nil {
+			if len(row.CodeCipher) == 0 {
+				return errQRCodeLegacy
+			}
+			return nil
 		}
-		return tx.Table("avatar_registration_qrcode").Create(map[string]any{"id": id, "status": "ACTIVE", "version": 1, "qrcode_no": fmt.Sprintf("AVQR-%d", id), "city_registration_config_id": nil, "city_org_id": city, "city_code": code, "code_hash": hash(token), "created_by": c.UserID, "status_changed_at": now, "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(c.UserID)}).Error
+		if err != gorm.ErrRecordNotFound {
+			return err
+		}
+		var createErr error
+		row, createErr = s.newPersistentQRCode(tx, city, code, c.UserID)
+		created = createErr == nil
+		return createErr
 	})
-	if e != nil {
+	if err == errQRCodeLegacy {
+		return nil, avatarError(409, "AVATAR_QRCODE_ROTATION_REQUIRED", "历史二维码无法再次下载，请显式更换二维码", nil)
+	}
+	if err != nil {
 		return nil, avatarError(500, "INTERNAL_ERROR", "创建二维码失败", nil)
 	}
-	entryURL, err := s.registrationH5URL(token)
+	data, err := s.qrcodeResponse(row)
 	if err != nil {
 		return nil, avatarError(503, "AVATAR_H5_ENTRY_NOT_CONFIGURED", "建档 H5 入口尚未配置", nil)
 	}
-	return gin.H{"qrcodeId": fmt.Sprint(id), "shortCode": token, "registrationURL": entryURL, "registrationPath": "/api/v1/avatar/public/registration-context?code=" + token, "status": "ACTIVE"}, nil
+	data["reused"] = !created
+	return data, nil
+}
+
+var errQRCodeLegacy = fmt.Errorf("qrcode legacy")
+
+type registrationQRCode struct {
+	ID         uint64     `gorm:"column:id"`
+	QRCodeNo   string     `gorm:"column:qrcode_no"`
+	Status     string     `gorm:"column:status"`
+	ScanCount  uint64     `gorm:"column:scan_count"`
+	ExpiresAt  *time.Time `gorm:"column:expires_at"`
+	CreatedAt  *time.Time `gorm:"column:created_at"`
+	UpdatedAt  *time.Time `gorm:"column:updated_at"`
+	CodeCipher []byte     `gorm:"column:code_cipher"`
+}
+
+func (s *Service) newPersistentQRCode(tx *gorm.DB, city uint64, cityCode string, userID uint64) (registrationQRCode, error) {
+	token, err := randomToken()
+	if err != nil {
+		return registrationQRCode{}, err
+	}
+	cipher, err := encrypt(s.auth.JWTSecret, token)
+	if err != nil {
+		return registrationQRCode{}, err
+	}
+	now := time.Now()
+	id := idgen.Next()
+	row := registrationQRCode{ID: id, QRCodeNo: fmt.Sprintf("AVQR-%d", id), Status: "ACTIVE", CodeCipher: cipher}
+	if err := tx.Table("avatar_registration_qrcode").Create(map[string]any{"id": id, "status": row.Status, "version": 1, "qrcode_no": row.QRCodeNo, "city_registration_config_id": nil, "city_org_id": city, "city_code": cityCode, "code_hash": hash(token), "code_cipher": cipher, "created_by": userID, "status_changed_at": now, "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(userID)}).Error; err != nil {
+		return registrationQRCode{}, err
+	}
+	return row, nil
+}
+
+func (s *Service) qrcodeResponse(row registrationQRCode) (gin.H, error) {
+	token, err := decrypt(s.auth.JWTSecret, row.CodeCipher)
+	if err != nil || token == "" {
+		return nil, fmt.Errorf("decrypt QR code: %w", err)
+	}
+	entryURL, err := s.registrationH5URL(token)
+	if err != nil {
+		return nil, err
+	}
+	return gin.H{"qrcodeId": fmt.Sprint(row.ID), "qrcodeNo": row.QRCodeNo, "shortCode": token, "registrationURL": entryURL, "registrationPath": "/api/v1/avatar/public/registration-context?code=" + token, "status": row.Status, "scanCount": row.ScanCount, "expiresAt": row.ExpiresAt, "createdAt": row.CreatedAt, "updatedAt": row.UpdatedAt, "downloadPath": "/api/v1/avatar/registration-qrcodes/" + fmt.Sprint(row.ID) + "/download"}, nil
 }
 
 // registrationH5URL returns the exact URL that must be encoded into a city QR
@@ -391,11 +446,90 @@ func (s *Service) listQRCodes(ctx context.Context, c identity.CurrentAdmin) (any
 	if ae != nil {
 		return nil, ae
 	}
-	var rows []map[string]any
-	if e := s.db.WithContext(ctx).Table("avatar_registration_qrcode").Select("id,qrcode_no,status,scan_count,expires_at,created_at,updated_at").Where("city_org_id=?", city).Order("created_at DESC").Limit(100).Find(&rows).Error; e != nil {
+	var rows []registrationQRCode
+	if e := s.db.WithContext(ctx).Table("avatar_registration_qrcode").Select("id,qrcode_no,status,scan_count,expires_at,created_at,updated_at,code_cipher").Where("city_org_id=?", city).Order("created_at DESC").Limit(100).Find(&rows).Error; e != nil {
 		return nil, avatarError(500, "INTERNAL_ERROR", "查询二维码失败", nil)
 	}
-	return gin.H{"items": rows}, nil
+	items := make([]gin.H, 0, len(rows))
+	for _, row := range rows {
+		item := gin.H{"id": fmt.Sprint(row.ID), "qrcodeNo": row.QRCodeNo, "status": row.Status, "scanCount": row.ScanCount, "expiresAt": row.ExpiresAt, "createdAt": row.CreatedAt, "updatedAt": row.UpdatedAt, "canDownload": false}
+		if row.Status != "REVOKED" && len(row.CodeCipher) > 0 {
+			if data, err := s.qrcodeResponse(row); err == nil {
+				item["registrationURL"] = data["registrationURL"]
+				item["downloadPath"] = data["downloadPath"]
+				item["canDownload"] = true
+			}
+		}
+		items = append(items, item)
+	}
+	return gin.H{"items": items}, nil
+}
+
+func (s *Service) rotateQRCode(ctx context.Context, c identity.CurrentAdmin, idText string) (any, *httpx.AppError) {
+	city, code, ae := cityOperator(c, "AVATAR_REGISTRATION_ENTRY_MANAGE")
+	if ae != nil {
+		return nil, ae
+	}
+	id, ok := parseUint(idText)
+	if !ok {
+		return nil, avatarError(400, "VALIDATION_FORMAT_INVALID", "二维码编号不正确", nil)
+	}
+	var row registrationQRCode
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var old registrationQRCode
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("avatar_registration_qrcode").Select("id,status").Where("id=? AND city_org_id=?", id, city).Take(&old).Error; err != nil {
+			return err
+		}
+		if old.Status == "REVOKED" {
+			return fmt.Errorf("revoked")
+		}
+		now := time.Now()
+		if err := tx.Table("avatar_registration_qrcode").Where("id=?", id).Updates(map[string]any{"status": "REVOKED", "updated_by": c.UserID, "updated_at": now, "status_changed_at": now, "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(c.UserID)}).Error; err != nil {
+			return err
+		}
+		var createErr error
+		row, createErr = s.newPersistentQRCode(tx, city, code, c.UserID)
+		return createErr
+	})
+	if err == gorm.ErrRecordNotFound {
+		return nil, avatarError(404, "AVATAR_QRCODE_NOT_FOUND", "二维码不存在", nil)
+	}
+	if err != nil {
+		return nil, avatarError(409, "AVATAR_QRCODE_STATE_INVALID", "当前二维码不可更换", nil)
+	}
+	data, err := s.qrcodeResponse(row)
+	if err != nil {
+		return nil, avatarError(503, "AVATAR_H5_ENTRY_NOT_CONFIGURED", "建档 H5 入口尚未配置", nil)
+	}
+	data["rotated"] = true
+	return data, nil
+}
+
+func (s *Service) downloadQRCode(ctx context.Context, c identity.CurrentAdmin, idText string) ([]byte, string, *httpx.AppError) {
+	city, _, ae := cityOperator(c, "AVATAR_REGISTRATION_ENTRY_MANAGE")
+	if ae != nil {
+		return nil, "", ae
+	}
+	id, ok := parseUint(idText)
+	if !ok {
+		return nil, "", avatarError(400, "VALIDATION_FORMAT_INVALID", "二维码编号不正确", nil)
+	}
+	var row registrationQRCode
+	if err := s.db.WithContext(ctx).Table("avatar_registration_qrcode").Select("id,qrcode_no,status,code_cipher").Where("id=? AND city_org_id=?", id, city).Take(&row).Error; err != nil {
+		return nil, "", avatarError(404, "AVATAR_QRCODE_NOT_FOUND", "二维码不存在", nil)
+	}
+	if row.Status == "REVOKED" || len(row.CodeCipher) == 0 {
+		return nil, "", avatarError(409, "AVATAR_QRCODE_STATE_INVALID", "当前二维码不可下载", nil)
+	}
+	data, err := s.qrcodeResponse(row)
+	if err != nil {
+		return nil, "", avatarError(503, "AVATAR_H5_ENTRY_NOT_CONFIGURED", "建档 H5 入口尚未配置", nil)
+	}
+	png, err := qrcode.Encode(fmt.Sprint(data["registrationURL"]), qrcode.Medium, 512)
+	if err != nil {
+		return nil, "", avatarError(500, "INTERNAL_ERROR", "生成二维码图片失败", nil)
+	}
+	return png, row.QRCodeNo + ".png", nil
 }
 func (s *Service) changeQRCode(ctx context.Context, c identity.CurrentAdmin, idText, status string) (any, *httpx.AppError) {
 	city, _, ae := cityOperator(c, "AVATAR_REGISTRATION_ENTRY_MANAGE")
@@ -405,6 +539,15 @@ func (s *Service) changeQRCode(ctx context.Context, c identity.CurrentAdmin, idT
 	id, ok := parseUint(idText)
 	if !ok {
 		return nil, avatarError(400, "VALIDATION_FORMAT_INVALID", "二维码编号不正确", nil)
+	}
+	if status == "ACTIVE" {
+		var count int64
+		if e := s.db.WithContext(ctx).Table("avatar_registration_qrcode").Where("city_org_id=? AND status='ACTIVE' AND id<>?", city, id).Count(&count).Error; e != nil {
+			return nil, avatarError(500, "INTERNAL_ERROR", "查询二维码失败", nil)
+		}
+		if count > 0 {
+			return nil, avatarError(409, "AVATAR_QRCODE_ACTIVE_EXISTS", "当前城市已有启用二维码", nil)
+		}
 	}
 	r := s.db.WithContext(ctx).Table("avatar_registration_qrcode").Where("id=? AND city_org_id=?", id, city).Updates(map[string]any{"status": status, "updated_by": c.UserID, "updated_at": time.Now(), "status_changed_at": time.Now(), "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(c.UserID)})
 	if r.Error != nil {

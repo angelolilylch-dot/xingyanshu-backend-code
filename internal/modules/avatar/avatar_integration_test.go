@@ -260,8 +260,13 @@ func TestAvatarRegistrationHTTPWithMySQLRedis(t *testing.T) {
 	if len(bodyStored.BodyDataJSONCipher) == 0 || bytes.Contains(bodyStored.BodyDataJSONCipher, []byte("SLIM")) {
 		t.Fatalf("body data is not encrypted")
 	}
-	must(t, db.Table("avatar_collection_session").Where("id=?", collection.Data["sessionId"]).Update("status", "PASSED").Error)
-	must(t, db.Table("avatar_profile").Where("roster_member_id=?", memberID).Updates(map[string]any{"status": "ARCHIVED", "collection_status": "PASSED", "quality_status": "PASSED", "archive_status": "ARCHIVED"}).Error)
+	must(t, db.Table("avatar_collection_session").Where("id=?", collection.Data["sessionId"]).Update("status", "SUBMITTED").Error)
+	must(t, db.Table("avatar_profile").Where("roster_member_id=?", memberID).Updates(map[string]any{"status": "AUTO_QUALITY_CHECKING", "collection_status": "SUBMITTED", "quality_status": "PENDING", "archive_status": "NOT_STARTED"}).Error)
+	if blocked := callAvatar(t, router, http.MethodPost, "/api/v1/avatar/collection-sessions", nil, token); blocked.Code != http.StatusConflict || !strings.Contains(blocked.Body, "AVATAR_COLLECTION_ALREADY_SUBMITTED") {
+		t.Fatalf("completed profile must not create another collection: %+v", blocked)
+	}
+	must(t, db.Table("avatar_collection_session").Where("id=?", collection.Data["sessionId"]).Update("status", "REJECTED").Error)
+	must(t, db.Table("avatar_profile").Where("roster_member_id=?", memberID).Updates(map[string]any{"status": "RESHOOT_REQUIRED", "collection_status": "REJECTED", "quality_status": "RESHOOT_REQUIRED", "archive_status": "NOT_STARTED"}).Error)
 	reshootKey := fmt.Sprintf("avatar-reshoot-%d", base)
 	reshootBody := gin.H{"reason": "主动更新采集资料"}
 	reshoot := callAvatarWithKey(t, router, http.MethodPost, "/api/v1/avatar/profiles/me/reshoot", reshootBody, token, reshootKey)
@@ -281,6 +286,11 @@ func TestAvatarRegistrationHTTPWithMySQLRedis(t *testing.T) {
 		t.Fatalf("reshoot conflict=%+v", conflict)
 	}
 	reshootSessionID := fmt.Sprint(reshoot.Data["sessionId"])
+	reshootBodyKey := fmt.Sprintf("avatar-reshoot-body-%d", base)
+	reshootBodyResult := callAvatarWithKey(t, router, http.MethodPatch, "/api/v1/avatar/collection-sessions/"+reshootSessionID+"/body-data", bodyBody, token, reshootBodyKey)
+	if reshootBodyResult.Code != http.StatusOK || fmt.Sprint(reshootBodyResult.Data["status"]) != "SAVED" {
+		t.Fatalf("reshoot body=%+v", reshootBodyResult)
+	}
 	for i, slot := range requiredCaptureSlots {
 		captureSlot, assetType := slot["captureSlot"].(string), slot["assetType"].(string)
 		mimeType := "image/jpeg"
@@ -344,6 +354,11 @@ func TestAvatarRegistrationHTTPWithMySQLRedis(t *testing.T) {
 	submitted := callAvatarWithKey(t, router, http.MethodPost, submitPath, nil, token, submitKey)
 	if submitted.Code != http.StatusOK || fmt.Sprint(submitted.Data["status"]) != "AUTO_QUALITY_CHECKING" {
 		t.Fatalf("submit=%+v", submitted)
+	}
+	profile := callAvatar(t, router, http.MethodGet, "/api/v1/avatar/profiles/me", nil, token)
+	profileSummary, _ := profile.Data["summary"].(map[string]any)
+	if profile.Code != http.StatusOK || profileSummary["bodyDataFilled"] != true || profileSummary["photoCount"] != float64(8) || profileSummary["videoCount"] != float64(1) || profile.Data["submittedAt"] == nil {
+		t.Fatalf("profile summary=%+v", profile)
 	}
 	submittedReplay := callAvatarWithKey(t, router, http.MethodPost, submitPath, nil, token, submitKey)
 	if submittedReplay.Code != http.StatusOK || submittedReplay.Header.Get("Idempotency-Replayed") != "true" {
@@ -485,9 +500,26 @@ func TestAvatarCityOperationsWithMySQL(t *testing.T) {
 	if ae != nil || fmt.Sprint(qr.(gin.H)["shortCode"]) == "" || !strings.HasPrefix(fmt.Sprint(qr.(gin.H)["registrationURL"]), "https://avatar-h5.test.xingyanshu.example/register?code=") {
 		t.Fatalf("qr=%+v err=%+v", qr, ae)
 	}
+	qrID := fmt.Sprint(qr.(gin.H)["qrcodeId"])
+	reused, ae := s.createQRCode(t.Context(), admin)
+	if ae != nil || reused.(gin.H)["reused"] != true || fmt.Sprint(reused.(gin.H)["qrcodeId"]) != qrID {
+		t.Fatalf("persistent QR must be reused: data=%+v err=%+v", reused, ae)
+	}
+	qrs, ae := s.listQRCodes(t.Context(), admin)
+	if ae != nil || len(qrs.(gin.H)["items"].([]gin.H)) != 1 || qrs.(gin.H)["items"].([]gin.H)[0]["canDownload"] != true {
+		t.Fatalf("persistent QR list=%+v err=%+v", qrs, ae)
+	}
+	png, name, ae := s.downloadQRCode(t.Context(), admin, qrID)
+	if ae != nil || !strings.HasSuffix(name, ".png") || !bytes.HasPrefix(png, []byte("\x89PNG\r\n\x1a\n")) {
+		t.Fatalf("persistent QR download name=%q bytes=%d err=%+v", name, len(png), ae)
+	}
 	entry, ae := s.registrationContext(t.Context(), fmt.Sprint(qr.(gin.H)["shortCode"]), "127.0.0.1")
 	if ae != nil || fmt.Sprint(entry.(gin.H)["supportPhone"]) != cfg.Avatar.FallbackSupportPhone || entry.(gin.H)["operatorName"] != nil {
 		t.Fatalf("entry=%+v err=%+v", entry, ae)
+	}
+	rotated, ae := s.rotateQRCode(t.Context(), admin, qrID)
+	if ae != nil || rotated.(gin.H)["rotated"] != true || fmt.Sprint(rotated.(gin.H)["qrcodeId"]) == qrID {
+		t.Fatalf("QR rotation=%+v err=%+v", rotated, ae)
 	}
 	var member uint64
 	must(t, db.Table("avatar_roster_member").Select("id").Where("roster_batch_id=?", batchID).Scan(&member).Error)

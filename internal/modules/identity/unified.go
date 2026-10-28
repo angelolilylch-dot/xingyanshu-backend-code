@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -36,7 +37,7 @@ func RegisterUnifiedRoutes(group *gin.RouterGroup, db *gorm.DB, cfg config.AuthC
 		if subject.ClientType == "ADMIN_WEB" {
 			current, err := authenticateAdmin(c, db, cfg)
 			if err != nil {
-				rejectUnified(c)
+				respondAdminAuthenticationError(c, err)
 				return
 			}
 			data, err := login.Me(c.Request.Context(), current)
@@ -95,7 +96,11 @@ func unifiedSubject(c *gin.Context, db *gorm.DB, cfg config.AuthConfig) (unified
 	}
 	var ses authSession
 	if err := db.WithContext(c.Request.Context()).Where("id=? AND subject_id=? AND client_type=? AND status='ACTIVE' AND expires_at>?", sessionID, userID, typ, time.Now()).First(&ses).Error; err != nil {
-		rejectUnified(c)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			rejectUnified(c)
+		} else {
+			httpx.AbortWithError(c, httpx.NewError(http.StatusServiceUnavailable, "AUTH_SERVICE_UNAVAILABLE", "登录服务暂不可用，请稍后重试"))
+		}
 		return unifiedCurrent{}, false
 	}
 	// JWT 中的令牌版本必须与当前会话一致；密码重置或强制退出后旧令牌会因此失效。

@@ -37,13 +37,40 @@ type Config struct {
 // for the independent AVATAR_H5. The support phone is public contact data,
 // not a credential, and is returned for every registration QR-code outcome.
 type AvatarConfig struct {
-	FallbackSupportPhone     string        `yaml:"fallback_support_phone"`
-	RegistrationH5URL        string        `yaml:"registration_h5_url"`
-	RosterIdentityProvider   string        `yaml:"roster_identity_provider"`
-	SMSResendInterval        time.Duration `yaml:"sms_resend_interval"`
-	SMSDailyLimit            int           `yaml:"sms_daily_limit"`
-	UploadCredentialParallel int           `yaml:"upload_credential_parallel"`
-	ProfilePollInterval      time.Duration `yaml:"profile_poll_interval"`
+	FallbackSupportPhone   string               `yaml:"fallback_support_phone"`
+	RegistrationH5URL      string               `yaml:"registration_h5_url"`
+	RosterIdentityProvider string               `yaml:"roster_identity_provider"`
+	RosterIdentity         RosterIdentityConfig `yaml:"roster_identity"`
+	FaceIdentity           FaceIdentityConfig   `yaml:"face_identity"`
+	// AssetStorage is optional. When omitted, avatar assets use the shared
+	// file.storage provider. Test deployments may select an isolated mock store
+	// here while all back-office file flows continue to use COS.
+	AssetStorage             *FileStorageConfig `yaml:"asset_storage"`
+	SMSResendInterval        time.Duration      `yaml:"sms_resend_interval"`
+	SMSDailyLimit            int                `yaml:"sms_daily_limit"`
+	UploadCredentialParallel int                `yaml:"upload_credential_parallel"`
+	ProfilePollInterval      time.Duration      `yaml:"profile_poll_interval"`
+}
+
+// RosterIdentityConfig configures Tencent Cloud PhoneVerification for the
+// operator-controlled three-factor check after roster import.
+type RosterIdentityConfig struct {
+	SecretID   string        `yaml:"secret_id"`
+	SecretKey  string        `yaml:"secret_key"`
+	Region     string        `yaml:"region"`
+	VerifyMode string        `yaml:"verify_mode"`
+	Timeout    time.Duration `yaml:"timeout"`
+}
+
+// FaceIdentityConfig configures the server-side 1:1 comparison of the
+// submitted FACE_01 asset against the roster identity. Values are intentionally
+// supplied only through process environment variables in deployed configs.
+type FaceIdentityConfig struct {
+	Provider  string        `yaml:"provider"`
+	SecretID  string        `yaml:"secret_id"`
+	SecretKey string        `yaml:"secret_key"`
+	PublicKey string        `yaml:"public_key"`
+	Timeout   time.Duration `yaml:"timeout"`
 }
 
 // LoggingConfig controls local, plain-text operational logs. Credentials are
@@ -199,6 +226,19 @@ func expandEnvironment(cfg *Config) {
 	file.Storage.COS.BucketURL = os.ExpandEnv(file.Storage.COS.BucketURL)
 	file.Storage.COS.SecretID = os.ExpandEnv(file.Storage.COS.SecretID)
 	file.Storage.COS.SecretKey = os.ExpandEnv(file.Storage.COS.SecretKey)
+	if cfg.Avatar.AssetStorage != nil {
+		asset := cfg.Avatar.AssetStorage
+		asset.COS.BucketURL = os.ExpandEnv(asset.COS.BucketURL)
+		asset.COS.SecretID = os.ExpandEnv(asset.COS.SecretID)
+		asset.COS.SecretKey = os.ExpandEnv(asset.COS.SecretKey)
+	}
+	cfg.Avatar.FaceIdentity.Provider = os.ExpandEnv(cfg.Avatar.FaceIdentity.Provider)
+	cfg.Avatar.FaceIdentity.SecretID = os.ExpandEnv(cfg.Avatar.FaceIdentity.SecretID)
+	cfg.Avatar.FaceIdentity.SecretKey = os.ExpandEnv(cfg.Avatar.FaceIdentity.SecretKey)
+	cfg.Avatar.FaceIdentity.PublicKey = os.ExpandEnv(cfg.Avatar.FaceIdentity.PublicKey)
+	cfg.Avatar.RosterIdentityProvider = os.ExpandEnv(cfg.Avatar.RosterIdentityProvider)
+	cfg.Avatar.RosterIdentity.SecretID = os.ExpandEnv(cfg.Avatar.RosterIdentity.SecretID)
+	cfg.Avatar.RosterIdentity.SecretKey = os.ExpandEnv(cfg.Avatar.RosterIdentity.SecretKey)
 	cfg.ContentSafety.SecretID = os.ExpandEnv(cfg.ContentSafety.SecretID)
 	cfg.ContentSafety.SecretKey = os.ExpandEnv(cfg.ContentSafety.SecretKey)
 	cfg.Evidence.CallbackSecret = os.ExpandEnv(cfg.Evidence.CallbackSecret)
@@ -295,11 +335,35 @@ func (c Config) Validate() error {
 			return fmt.Errorf("avatar.roster_identity_provider must be a real provider in production")
 		}
 	}
+	if c.Avatar.RosterIdentityProvider != "" && c.Avatar.RosterIdentityProvider != "mock" && c.Avatar.RosterIdentityProvider != "tencent_phone_verification" {
+		return fmt.Errorf("avatar.roster_identity_provider must be mock or tencent_phone_verification")
+	}
+	if c.Avatar.RosterIdentityProvider == "tencent_phone_verification" {
+		if c.Avatar.RosterIdentity.SecretID == "" || c.Avatar.RosterIdentity.SecretKey == "" || c.Avatar.RosterIdentity.Region == "" || c.Avatar.RosterIdentity.Timeout <= 0 {
+			return fmt.Errorf("avatar.roster_identity secret_id, secret_key, region and timeout are required for tencent_phone_verification")
+		}
+		if c.Avatar.RosterIdentity.VerifyMode != "" && c.Avatar.RosterIdentity.VerifyMode != "0" && c.Avatar.RosterIdentity.VerifyMode != "1" {
+			return fmt.Errorf("avatar.roster_identity.verify_mode must be 0 or 1")
+		}
+	}
+	if faceIdentityConfigured(c.Avatar.FaceIdentity) {
+		if c.Avatar.FaceIdentity.Provider != "tencent_image_recognition_v2" {
+			return fmt.Errorf("avatar.face_identity.provider must be tencent_image_recognition_v2 when configured")
+		}
+		if c.Avatar.FaceIdentity.SecretID == "" || c.Avatar.FaceIdentity.SecretKey == "" || c.Avatar.FaceIdentity.PublicKey == "" || c.Avatar.FaceIdentity.Timeout <= 0 {
+			return fmt.Errorf("avatar.face_identity secret_id, secret_key, public_key and timeout are required when configured")
+		}
+	}
 	if c.Bootstrap.PlatformOrgName == "" || c.Bootstrap.InitialAdmin.Username == "" || c.Bootstrap.InitialAdmin.Password == "" || c.Bootstrap.InitialAdmin.DisplayName == "" {
 		return fmt.Errorf("bootstrap.platform_org_name and bootstrap.initial_admin fields are required")
 	}
-	if c.File.Storage.Provider != "cos" && c.File.Storage.Provider != "mock" {
-		return fmt.Errorf("file.storage.provider must be cos or mock")
+	if err := validateStorageConfig(c.App.Environment, "file.storage", c.File.Storage, true); err != nil {
+		return err
+	}
+	if c.Avatar.AssetStorage != nil {
+		if err := validateStorageConfig(c.App.Environment, "avatar.asset_storage", *c.Avatar.AssetStorage, false); err != nil {
+			return err
+		}
 	}
 	if c.File.Storage.KeyPrefix == "" || c.File.SignedURLTTL <= 0 || c.File.WatchInterval <= 0 {
 		return fmt.Errorf("file storage key_prefix, signed_url_ttl and watch_interval are required")
@@ -307,19 +371,6 @@ func (c Config) Validate() error {
 	for _, policy := range []FileCategoryPolicy{c.File.Policy.Images, c.File.Policy.Documents, c.File.Policy.Media} {
 		if len(policy.Extensions) == 0 || policy.MaxSizeMB <= 0 {
 			return fmt.Errorf("file policy extensions and max_size_mb must be positive")
-		}
-	}
-	if c.File.Storage.Provider == "cos" {
-		cos := c.File.Storage.COS
-		if cos.BucketURL == "" || cos.SecretID == "" || cos.SecretKey == "" {
-			return fmt.Errorf("file.storage.cos bucket_url, secret_id and secret_key are required when provider is cos")
-		}
-	} else {
-		if c.App.Environment != "test" {
-			return fmt.Errorf("file.storage.provider mock is only allowed in test environment")
-		}
-		if strings.TrimSpace(c.File.Storage.LocalRoot) == "" || !isAbsoluteHTTPURL(c.File.Storage.MockUploadBaseURL) {
-			return fmt.Errorf("file.storage.local_root and mock_upload_base_url are required when provider is mock")
 		}
 	}
 	if c.ContentSafety.Provider != "" && c.ContentSafety.Provider != "tencent_tms" && c.ContentSafety.Provider != "mock" {
@@ -341,6 +392,32 @@ func (c Config) Validate() error {
 	}
 	if c.Evidence.Provider == "mock" && (c.App.Environment != "test" || c.Evidence.CallbackSecret == "") {
 		return fmt.Errorf("evidence mock is only allowed in test with callback_secret")
+	}
+	return nil
+}
+
+func faceIdentityConfigured(value FaceIdentityConfig) bool {
+	return strings.TrimSpace(value.Provider) != "" || strings.TrimSpace(value.SecretID) != "" || strings.TrimSpace(value.SecretKey) != "" || strings.TrimSpace(value.PublicKey) != "" || value.Timeout != 0
+}
+
+func validateStorageConfig(environment, path string, value FileStorageConfig, requireKeyPrefix bool) error {
+	if value.Provider != "cos" && value.Provider != "mock" {
+		return fmt.Errorf("%s.provider must be cos or mock", path)
+	}
+	if requireKeyPrefix && value.KeyPrefix == "" {
+		return fmt.Errorf("%s.key_prefix is required", path)
+	}
+	if value.Provider == "cos" {
+		if value.COS.BucketURL == "" || value.COS.SecretID == "" || value.COS.SecretKey == "" {
+			return fmt.Errorf("%s.cos bucket_url, secret_id and secret_key are required when provider is cos", path)
+		}
+		return nil
+	}
+	if environment != "test" {
+		return fmt.Errorf("%s.provider mock is only allowed in test environment", path)
+	}
+	if strings.TrimSpace(value.LocalRoot) == "" || !isAbsoluteHTTPURL(value.MockUploadBaseURL) {
+		return fmt.Errorf("%s.local_root and mock_upload_base_url are required when provider is mock", path)
 	}
 	return nil
 }

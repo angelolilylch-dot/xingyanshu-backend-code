@@ -13,8 +13,8 @@ import (
 	"xingyanshu-backend/internal/platform/idgen"
 )
 
-const consentPurpose = "为建立个人数字形象档案，采集照片、朗读视频及可选体型资料；首次归档后保存365天。"
-const consentAgreementContent = "个人数字形象采集与入库授权\n\n您同意平台为建立个人数字形象档案，采集八张面部照片、朗读视频及您主动填写的可选体型资料。素材仅用于建档与质量管理，不用于对外使用授权。\n\n档案首次归档后保存365天；您可在保存期内申请删除。"
+const consentPurpose = "为建立个人数字形象档案，采集照片、朗读视频及可选体型资料；使用姓名、身份证号和正面照进行本人一致性核验；首次归档后保存365天。"
+const consentAgreementContent = "个人数字形象采集与入库授权\n\n您同意平台为建立个人数字形象档案，采集八张面部照片、朗读视频及您主动填写的可选体型资料。平台将在您提交采集资料后，使用名单中的姓名、身份证号和正面照向腾讯云人脸核身服务发起本人一致性核验。素材仅用于建档、实名核验与质量管理，不用于对外使用授权。\n\n档案首次归档后保存365天；您可在保存期内申请删除。"
 
 func (s *Service) currentConsent(ctx context.Context, cur Current) any {
 	var v struct {
@@ -65,14 +65,14 @@ func (s *Service) profileMe(ctx context.Context, cur Current) (any, *httpx.AppEr
 	if e := s.db.WithContext(ctx).Table("avatar_profile").Where("account_id=?", cur.AccountID).Take(&p).Error; e != nil {
 		return nil, avatarError(404, "AVATAR_PROFILE_NOT_FOUND", "尚未完成名单绑定", nil)
 	}
-	var summary struct {
-		Photos, Videos     int64
+	var collectionSummary struct {
 		BodyDataJSONCipher []byte
 		SubmittedAt        *time.Time
 	}
+	var assetSummary struct{ Photos, Videos int64 }
 	if p.CurrentCollectionSessionID != nil {
-		s.db.WithContext(ctx).Table("avatar_collection_session").Select("submitted_at,body_data_json_cipher").Where("id=?", *p.CurrentCollectionSessionID).Take(&summary)
-		s.db.WithContext(ctx).Table("avatar_asset").Select("SUM(CASE WHEN asset_type='FACE_PHOTO' AND status='CONFIRMED' THEN 1 ELSE 0 END) photos,SUM(CASE WHEN asset_type='VOICE_VIDEO' AND status='CONFIRMED' THEN 1 ELSE 0 END) videos").Where("collection_session_id=?", *p.CurrentCollectionSessionID).Scan(&summary)
+		s.db.WithContext(ctx).Table("avatar_collection_session").Select("submitted_at,body_data_json_cipher").Where("id=?", *p.CurrentCollectionSessionID).Take(&collectionSummary)
+		s.db.WithContext(ctx).Table("avatar_asset").Select("SUM(CASE WHEN asset_type='FACE_PHOTO' AND status='CONFIRMED' THEN 1 ELSE 0 END) photos,SUM(CASE WHEN asset_type='VOICE_VIDEO' AND status='CONFIRMED' THEN 1 ELSE 0 END) videos").Where("collection_session_id=?", *p.CurrentCollectionSessionID).Scan(&assetSummary)
 	}
 	var n int64
 	s.db.WithContext(ctx).Table("avatar_deletion_request").Where("profile_id=? AND status IN ('PENDING','APPROVED','PROCESSING')", p.ID).Count(&n)
@@ -80,7 +80,7 @@ func (s *Service) profileMe(ctx context.Context, cur Current) (any, *httpx.AppEr
 	if p.CurrentCollectionSessionID != nil {
 		latestSessionID = fmt.Sprint(*p.CurrentCollectionSessionID)
 	}
-	return gin.H{"profileId": fmt.Sprint(p.ID), "profileNo": p.ProfileNo, "version": p.Version, "status": p.Status, "realNameStatus": p.RealNameStatus, "collectionStatus": p.CollectionStatus, "qualityStatus": p.QualityStatus, "archiveStatus": p.ArchiveStatus, "archivedAt": p.ArchivedAt, "retentionUntil": p.RetentionUntil, "latestSessionId": latestSessionID, "summary": gin.H{"photoCount": summary.Photos, "videoCount": summary.Videos, "bodyDataFilled": len(summary.BodyDataJSONCipher) > 0}, "submittedAt": summary.SubmittedAt, "canRequestDeletion": n == 0}, nil
+	return gin.H{"profileId": fmt.Sprint(p.ID), "profileNo": p.ProfileNo, "version": p.Version, "status": p.Status, "realNameStatus": p.RealNameStatus, "collectionStatus": p.CollectionStatus, "qualityStatus": p.QualityStatus, "archiveStatus": p.ArchiveStatus, "archivedAt": p.ArchivedAt, "retentionUntil": p.RetentionUntil, "latestSessionId": latestSessionID, "summary": gin.H{"photoCount": assetSummary.Photos, "videoCount": assetSummary.Videos, "bodyDataFilled": len(collectionSummary.BodyDataJSONCipher) > 0}, "submittedAt": collectionSummary.SubmittedAt, "canRequestDeletion": n == 0}, nil
 }
 func (s *Service) requestDeletion(ctx context.Context, cur Current, r deletionRequest) (any, *httpx.AppError) {
 	var data gin.H
@@ -141,10 +141,10 @@ func (s *Service) reshoot(ctx context.Context, cur Current, r reshootRequest, ip
 	if e := s.db.WithContext(ctx).Table("avatar_profile").Select("status").Where("account_id=?", cur.AccountID).Take(&profile).Error; e != nil {
 		return nil, avatarError(404, "AVATAR_PROFILE_NOT_FOUND", "尚未完成名单绑定", nil)
 	}
-	if profile.Status != "ARCHIVED" && profile.Status != "RESHOOT_REQUIRED" {
+	if profile.Status != "RESHOOT_REQUIRED" {
 		return nil, avatarError(http.StatusConflict, "AVATAR_PROFILE_STATE_INVALID", "当前档案状态不可补采", nil)
 	}
-	data, e := s.startCollection(ctx, cur)
+	data, e := s.startCollection(ctx, cur, true)
 	if e != nil {
 		return nil, e
 	}

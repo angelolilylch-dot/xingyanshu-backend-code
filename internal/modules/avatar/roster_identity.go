@@ -9,7 +9,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	common "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
+	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
+	faceid "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/faceid/v20180301"
 	"gorm.io/gorm"
+	"xingyanshu-backend/internal/config"
 	"xingyanshu-backend/internal/modules/identity"
 	"xingyanshu-backend/internal/platform/httpx"
 	"xingyanshu-backend/internal/platform/idgen"
@@ -46,9 +50,57 @@ func (mockRosterIdentityVerifier) Verify(_ context.Context, input rosterIdentity
 	return rosterIdentityResult{ProviderCode: "MOCK", ProviderRequestNo: requestNo, ResponseDigest: fmt.Sprintf("%x", digest[:])}, nil
 }
 
-func newRosterIdentityVerifier(environment, provider string) rosterIdentityVerifier {
-	if environment == "test" && (strings.TrimSpace(provider) == "" || strings.EqualFold(strings.TrimSpace(provider), "mock")) {
+type tencentPhoneVerificationVerifier struct {
+	client     *faceid.Client
+	verifyMode string
+}
+
+func (p *tencentPhoneVerificationVerifier) Verify(ctx context.Context, input rosterIdentityInput) (rosterIdentityResult, error) {
+	if strings.TrimSpace(input.Name) == "" || !mobilePattern.MatchString(input.Mobile) || !validChineseIDNumber(input.IDNumber) {
+		return rosterIdentityResult{}, fmt.Errorf("invalid three-factor identity input")
+	}
+	request := faceid.NewPhoneVerificationRequest()
+	request.Name = common.StringPtr(input.Name)
+	request.IdCard = common.StringPtr(input.IDNumber)
+	request.Phone = common.StringPtr(input.Mobile)
+	request.VerifyMode = common.StringPtr(p.verifyMode)
+	response, err := p.client.PhoneVerificationWithContext(ctx, request)
+	if err != nil {
+		return rosterIdentityResult{ProviderCode: "TENCENT_PHONE_VERIFICATION"}, fmt.Errorf("Tencent PhoneVerification: %w", err)
+	}
+	if response == nil || response.Response == nil || response.Response.RequestId == nil || response.Response.Result == nil {
+		return rosterIdentityResult{ProviderCode: "TENCENT_PHONE_VERIFICATION"}, fmt.Errorf("Tencent PhoneVerification returned incomplete response")
+	}
+	digest := sha256.Sum256([]byte(strings.Join([]string{stringValue(response.Response.Result), stringValue(response.Response.Description), stringValue(response.Response.ResultDetail), stringValue(response.Response.Isp)}, ":")))
+	result := rosterIdentityResult{ProviderCode: "TENCENT_PHONE_VERIFICATION", ProviderRequestNo: *response.Response.RequestId, ResponseDigest: fmt.Sprintf("%x", digest[:])}
+	if *response.Response.Result != "0" {
+		return result, fmt.Errorf("Tencent PhoneVerification result %s", *response.Response.Result)
+	}
+	return result, nil
+}
+
+func newRosterIdentityVerifier(environment string, settings config.AvatarConfig) rosterIdentityVerifier {
+	provider := strings.ToLower(strings.TrimSpace(settings.RosterIdentityProvider))
+	if environment == "test" && (provider == "" || provider == "mock") {
 		return mockRosterIdentityVerifier{}
+	}
+	if provider == "tencent_phone_verification" {
+		cfg := settings.RosterIdentity
+		if cfg.SecretID == "" || cfg.SecretKey == "" || cfg.Region == "" || cfg.Timeout <= 0 {
+			return unavailableRosterIdentityVerifier{}
+		}
+		cp := profile.NewClientProfile()
+		cp.HttpProfile.Endpoint = "faceid.tencentcloudapi.com"
+		cp.HttpProfile.ReqTimeout = int(cfg.Timeout / time.Second)
+		client, err := faceid.NewClient(common.NewCredential(cfg.SecretID, cfg.SecretKey), cfg.Region, cp)
+		if err != nil {
+			return unavailableRosterIdentityVerifier{}
+		}
+		verifyMode := cfg.VerifyMode
+		if verifyMode == "" {
+			verifyMode = "0"
+		}
+		return &tencentPhoneVerificationVerifier{client: client, verifyMode: verifyMode}
 	}
 	return unavailableRosterIdentityVerifier{}
 }
@@ -160,15 +212,17 @@ func (s *Service) processPendingRosterIdentity(ctx context.Context, row struct {
 	result, err := s.rosterIDV.Verify(ctx, rosterIdentityInput{Name: name, IDNumber: idNumber, Mobile: mobile})
 	now := time.Now()
 	updates := map[string]any{"updated_at": now, "status_changed_at": now, "status_changed_by_type": "THIRD_PARTY"}
+	if result.ProviderCode != "" {
+		updates["identity_provider_code"] = result.ProviderCode
+		updates["identity_provider_request_no"] = result.ProviderRequestNo
+		updates["identity_response_digest"] = result.ResponseDigest
+	}
 	if err != nil {
 		updates["status"] = "INACTIVE"
 		updates["status_reason_code"] = "IDENTITY_VERIFICATION_FAILED"
 		updates["status_reason"] = "实名核验未通过，请核对姓名、身份证号和手机号"
 	} else {
 		updates["status"] = "ACTIVE"
-		updates["identity_provider_code"] = result.ProviderCode
-		updates["identity_provider_request_no"] = result.ProviderRequestNo
-		updates["identity_response_digest"] = result.ResponseDigest
 		updates["identity_verified_at"] = now
 	}
 	if dbErr := s.db.WithContext(ctx).Table("avatar_roster_member").Where("id=? AND status='PENDING_IDENTITY'", row.ID).Updates(updates).Error; dbErr != nil {

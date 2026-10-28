@@ -14,8 +14,8 @@ logging:
 
 database:
   driver: mysql
-  # 固定使用远程测试库；账号和密码只从本机环境变量读取，禁止写入仓库。
-  host: 101.43.49.193
+  # 本地真实核身调试库；账号和密码只从本机环境变量读取，禁止写入仓库。
+  host: localhost
   port: 3306
   name: xingyanshu_test
   username: ${XINGYANSHU_DB_USERNAME}
@@ -36,7 +36,8 @@ cors:
     - "*"
 
 content_safety:
-  provider: tencent_tms
+  # 本地个人形象真实核身调试不依赖内容安全服务；避免未配置 TMS 凭据阻断服务启动。
+  provider: mock
   region: ap-guangzhou
   biz_type: ip_center
   secret_id: ${XINGYANSHU_TMS_SECRET_ID}
@@ -54,6 +55,20 @@ avatar:
   registration_h5_url: "https://avatar-h5.test.xingyanshu.example/register"
   # 名单导入时直接调用三要素实名服务；mock 仅允许 test 环境。
   roster_identity_provider: mock
+  # 改为 tencent_phone_verification 后，手动执行批次核验会调用腾讯云 PhoneVerification。
+  roster_identity:
+    secret_id: ${XINGYANSHU_ROSTER_IDV_SECRET_ID}
+    secret_key: ${XINGYANSHU_ROSTER_IDV_SECRET_KEY}
+    region: ap-guangzhou
+    verify_mode: "0"
+    timeout: 15s
+  # 真实照片人脸核身仅由后端在提交后执行；凭据和 RSA 公钥只能从本机环境变量读取。
+  face_identity:
+    provider: ${XINGYANSHU_FACEID_PROVIDER}
+    secret_id: ${XINGYANSHU_FACEID_SECRET_ID}
+    secret_key: ${XINGYANSHU_FACEID_SECRET_KEY}
+    public_key: ${XINGYANSHU_FACEID_RSA_PUBLIC_KEY}
+    timeout: 15s
   sms_resend_interval: 1m
   sms_daily_limit: 10
   upload_credential_parallel: 3

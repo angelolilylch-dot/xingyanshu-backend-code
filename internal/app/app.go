@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -55,6 +56,10 @@ func RunServer(cfg config.Config, configPath string) error {
 	if err != nil {
 		return fmt.Errorf("open COS file storage: %w", err)
 	}
+	avatarStorage, err := openAvatarStorage(cfg, storage)
+	if err != nil {
+		return fmt.Errorf("open avatar asset storage: %w", err)
+	}
 	filePolicy := config.NewFilePolicyProvider(cfg.File.Policy)
 	watchContext, cancelWatch := context.WithCancel(context.Background())
 	defer cancelWatch()
@@ -77,9 +82,9 @@ func RunServer(cfg config.Config, configPath string) error {
 	workService := works.NewService(db, contentmoderation.NewProvider(cfg.ContentSafety), evidenceService)
 	productService := products.NewService(db, contentmoderation.NewProvider(cfg.ContentSafety), storage)
 	activityService := activities.NewService(db, contentmoderation.NewProvider(cfg.ContentSafety))
-	avatarService := avatar.NewServiceWithConfig(db, redisClient, cfg.Auth, cfg.App.Environment, cfg.Avatar, storage)
+	avatarService := avatar.NewServiceWithConfig(db, redisClient, cfg.Auth, cfg.App.Environment, cfg.Avatar, avatarStorage)
 	apiGroup := router.Group("/api/v1")
-	registerMockStorageRoutes(apiGroup, storage)
+	registerMockStorageRoutes(apiGroup, storage, avatarStorage)
 	identity.RegisterPublicRoutes(apiGroup, captchaService, loginService)
 	identity.RegisterUnifiedRoutes(apiGroup, db, cfg.Auth, loginService)
 	identity.RegisterConsumerRoutes(apiGroup, loginService, identity.RequireConsumerAuthentication(db, cfg.Auth))
@@ -108,14 +113,32 @@ func RunServer(cfg config.Config, configPath string) error {
 	return router.Run(cfg.App.Server.Address)
 }
 
-func registerMockStorageRoutes(api *gin.RouterGroup, storage filestore.Storage) {
-	mock, ok := storage.(filestore.MockHTTPStorage)
-	if !ok {
+func openAvatarStorage(cfg config.Config, fallback filestore.Storage) (filestore.Storage, error) {
+	if cfg.Avatar.AssetStorage == nil {
+		return fallback, nil
+	}
+	return filestore.New(*cfg.Avatar.AssetStorage)
+}
+
+func registerMockStorageRoutes(api *gin.RouterGroup, storage, avatarStorage filestore.Storage) {
+	defaultMock, defaultOK := storage.(filestore.MockHTTPStorage)
+	avatarMock, avatarOK := avatarStorage.(filestore.MockHTTPStorage)
+	if !defaultOK && !avatarOK {
 		return
+	}
+	selectMock := func(key string) filestore.MockHTTPStorage {
+		if strings.HasPrefix(key, "avatar/private/") && avatarOK {
+			return avatarMock
+		}
+		if defaultOK {
+			return defaultMock
+		}
+		return nil
 	}
 	api.PUT("/mock-storage/upload", func(c *gin.Context) {
 		key := c.Query("key")
-		if key == "" {
+		mock := selectMock(key)
+		if key == "" || mock == nil {
 			c.Status(http.StatusBadRequest)
 			return
 		}
@@ -127,7 +150,8 @@ func registerMockStorageRoutes(api *gin.RouterGroup, storage filestore.Storage) 
 	})
 	api.GET("/mock-storage/download", func(c *gin.Context) {
 		key := c.Query("key")
-		if key == "" {
+		mock := selectMock(key)
+		if key == "" || mock == nil {
 			c.Status(http.StatusBadRequest)
 			return
 		}
@@ -161,10 +185,14 @@ func RunWorker(cfg config.Config) error {
 	productOrderService := productorders.NewService(db)
 	activityBookingService := activitybookings.NewService(db)
 	activityService := activities.NewService(db, contentmoderation.NewProvider(cfg.ContentSafety))
-	avatarService := avatar.NewServiceWithConfig(db, nil, cfg.Auth, cfg.App.Environment, cfg.Avatar, storage)
+	avatarStorage, err := openAvatarStorage(cfg, storage)
+	if err != nil {
+		return fmt.Errorf("open avatar asset storage: %w", err)
+	}
+	avatarService := avatar.NewServiceWithConfig(db, nil, cfg.Auth, cfg.App.Environment, cfg.Avatar, avatarStorage)
 	contractProcessor := payments.NewContractProcessor(db, fileService, evidenceService)
 	interval := time.Minute
-	log.Printf("worker started: environment=%s interval=%s jobs=auth-order-timeout,product-order-timeout,activity-booking-timeout,activity-booking-expiry,contract-generation,evidence-retry,activity-end,avatar-quality,avatar-roster-identity,avatar-export", cfg.App.Environment, interval)
+	log.Printf("worker started: environment=%s interval=%s jobs=auth-order-timeout,product-order-timeout,activity-booking-timeout,activity-booking-expiry,contract-generation,evidence-retry,activity-end,avatar-quality,avatar-roster-identity,avatar-face-identity,avatar-export", cfg.App.Environment, interval)
 	for {
 		if count, err := service.CloseExpired(context.Background()); err != nil {
 			logx.Errorf("module=authorders action=close_expired stage=worker error_type=%T error=%q", err, logx.Redact(err.Error()))

@@ -165,6 +165,9 @@ func (s *Service) submitCollection(ctx context.Context, cur Current, idText stri
 	if !ok {
 		return nil, avatarError(400, "VALIDATION_FORMAT_INVALID", "采集会话不正确", nil)
 	}
+	if s.faceIDVErr != nil {
+		return nil, avatarError(503, "AVATAR_FACE_IDENTITY_PROVIDER_NOT_CONFIGURED", "本人一致性核验服务暂不可用", nil)
+	}
 	var assets []struct{ AssetType, CaptureSlot string }
 	s.db.WithContext(ctx).Table("avatar_asset a").Select("a.asset_type,a.capture_slot").Joins("JOIN avatar_collection_session cs ON cs.id=a.collection_session_id JOIN avatar_profile p ON p.id=cs.profile_id").Where("a.collection_session_id=? AND p.account_id=? AND a.status='CONFIRMED'", id, cur.AccountID).Find(&assets)
 	confirmed := map[string]bool{}
@@ -189,14 +192,23 @@ func (s *Service) submitCollection(ctx context.Context, cur Current, idText stri
 	var taskID uint64
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row struct {
-			ProfileID uint64
-			Status    string
+			ProfileID, RosterMemberID uint64
+			Status                    string
 		}
-		if e := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("avatar_collection_session cs").Select("cs.profile_id,cs.status").Joins("JOIN avatar_profile p ON p.id=cs.profile_id").Where("cs.id=? AND p.account_id=?", id, cur.AccountID).Take(&row).Error; e != nil {
+		if e := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("avatar_collection_session cs").Select("cs.profile_id,p.roster_member_id,cs.status").Joins("JOIN avatar_profile p ON p.id=cs.profile_id").Where("cs.id=? AND p.account_id=?", id, cur.AccountID).Take(&row).Error; e != nil {
 			return e
 		}
 		if row.Status != "COLLECTING" {
 			return fmt.Errorf("invalid status")
+		}
+		if _, unavailable := s.faceIDV.(unavailableFaceIdentityVerifier); !unavailable {
+			var faceAsset struct{ ID uint64 }
+			if e := tx.Table("avatar_asset").Select("id").Where("collection_session_id=? AND capture_slot='FACE_01' AND status='CONFIRMED'", id).Take(&faceAsset).Error; e != nil {
+				return fmt.Errorf("face asset missing")
+			}
+			if e := s.createFaceIdentityVerification(tx, cur.AccountID, row.ProfileID, row.RosterMemberID, id, faceAsset.ID); e != nil {
+				return e
+			}
 		}
 		now := time.Now()
 		taskID = idgen.Next()
@@ -206,7 +218,13 @@ func (s *Service) submitCollection(ctx context.Context, cur Current, idText stri
 		if e := tx.Table("avatar_collection_session").Where("id=?", id).Updates(map[string]any{"status": "SUBMITTED", "submitted_at": now, "updated_at": now, "status_changed_at": now, "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(cur.AccountID)}).Error; e != nil {
 			return e
 		}
-		return tx.Table("avatar_profile").Where("id=?", row.ProfileID).Updates(map[string]any{"status": "AUTO_QUALITY_CHECKING", "collection_status": "SUBMITTED", "quality_status": "PENDING", "updated_at": now, "status_changed_at": now, "status_changed_by_type": "SYSTEM"}).Error
+		profileUpdate := map[string]any{"status": "AUTO_QUALITY_CHECKING", "collection_status": "SUBMITTED", "quality_status": "PENDING", "updated_at": now, "status_changed_at": now, "status_changed_by_type": "SYSTEM"}
+		if _, unavailable := s.faceIDV.(unavailableFaceIdentityVerifier); !unavailable {
+			// The roster import check has already passed. Once FACE_01 is queued for
+			// the submitted collection, this field represents the pending 1:1 check.
+			profileUpdate["real_name_status"] = "PENDING"
+		}
+		return tx.Table("avatar_profile").Where("id=?", row.ProfileID).Updates(profileUpdate).Error
 	})
 	if err != nil {
 		return nil, avatarError(409, "AVATAR_COLLECTION_SUBMIT_CONFLICT", "采集会话状态已变化", nil)

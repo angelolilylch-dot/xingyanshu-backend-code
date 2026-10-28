@@ -53,6 +53,19 @@ avatar:
   registration_h5_url: "https://avatar-h5.test.xingyanshu.example/register"
   # 名单导入时直接调用三要素实名服务；mock 仅允许 test 环境。
   roster_identity_provider: mock
+  # 改为 tencent_phone_verification 后，手动执行批次核验会调用腾讯云 PhoneVerification。
+  roster_identity:
+    secret_id: ${XINGYANSHU_ROSTER_IDV_SECRET_ID}
+    secret_key: ${XINGYANSHU_ROSTER_IDV_SECRET_KEY}
+    region: ap-guangzhou
+    verify_mode: "0"
+    timeout: 15s
+  # 可选：仅个人形象素材改为 Mock，后台通用文件仍使用下方 COS。
+  # 服务器 H5 联调时请改为服务器自身可访问的地址。
+  asset_storage:
+    provider: mock
+    local_root: .runtime/avatar-mock-storage
+    mock_upload_base_url: http://127.0.0.1:8080
   sms_resend_interval: 1m
   sms_daily_limit: 10
   upload_credential_parallel: 3

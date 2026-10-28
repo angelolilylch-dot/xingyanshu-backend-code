@@ -43,6 +43,8 @@ type Service struct {
 	storage     filestore.Storage
 	settings    config.AvatarConfig
 	rosterIDV   rosterIdentityVerifier
+	faceIDV     faceIdentityVerifier
+	faceIDVErr  error
 }
 type Current struct{ AccountID, SessionID uint64 }
 
@@ -146,7 +148,12 @@ func NewService(db *gorm.DB, r *redis.Client, auth config.AuthConfig, environmen
 
 func NewServiceWithConfig(db *gorm.DB, r *redis.Client, auth config.AuthConfig, environment string, settings config.AvatarConfig, storage ...filestore.Storage) *Service {
 	settings = config.NormalizeAvatarConfig(settings)
-	s := &Service{db: db, redis: r, auth: auth, environment: environment, settings: settings, rosterIDV: newRosterIdentityVerifier(environment, settings.RosterIdentityProvider)}
+	faceIDV, err := newFaceIdentityVerifier(settings.FaceIdentity)
+	faceIDVErr := err
+	if faceIDVErr != nil {
+		faceIDV = unavailableFaceIdentityVerifier{}
+	}
+	s := &Service{db: db, redis: r, auth: auth, environment: environment, settings: settings, rosterIDV: newRosterIdentityVerifier(environment, settings), faceIDV: faceIDV, faceIDVErr: faceIDVErr}
 	if len(storage) > 0 {
 		s.storage = storage[0]
 	}
@@ -374,7 +381,9 @@ func RegisterRoutes(group *gin.RouterGroup, s *Service, middleware gin.HandlerFu
 		if !ok {
 			return
 		}
-		avatarWrite(c, s, cur, raw, http.StatusCreated, func(scoped *Service) (any, *httpx.AppError) { return scoped.startCollection(c.Request.Context(), cur) })
+		avatarWrite(c, s, cur, raw, http.StatusCreated, func(scoped *Service) (any, *httpx.AppError) {
+			return scoped.startCollection(c.Request.Context(), cur, false)
+		})
 	})
 	protected.POST("/collection-sessions/:id/assets/upload-credentials", func(c *gin.Context) {
 		var r assetCredentialRequest
@@ -544,7 +553,11 @@ func RegisterAdminRoutes(group *gin.RouterGroup, s *Service, middleware gin.Hand
 			httpx.AbortWithError(c, e)
 			return
 		}
-		httpx.Success(c, http.StatusCreated, data)
+		status := http.StatusCreated
+		if value, ok := data.(gin.H); ok && value["reused"] == true {
+			status = http.StatusOK
+		}
+		httpx.Success(c, status, data)
 	})
 	admin.GET("/registration-qrcodes", func(c *gin.Context) {
 		current, _ := identity.CurrentAdminFromContext(c)
@@ -554,6 +567,25 @@ func RegisterAdminRoutes(group *gin.RouterGroup, s *Service, middleware gin.Hand
 			return
 		}
 		httpx.Success(c, http.StatusOK, data)
+	})
+	admin.GET("/registration-qrcodes/:id/download", func(c *gin.Context) {
+		current, _ := identity.CurrentAdminFromContext(c)
+		png, name, e := s.downloadQRCode(c.Request.Context(), current, c.Param("id"))
+		if e != nil {
+			httpx.AbortWithError(c, e)
+			return
+		}
+		c.Header("Content-Disposition", "attachment; filename=\""+name+"\"")
+		c.Data(http.StatusOK, "image/png", png)
+	})
+	admin.POST("/registration-qrcodes/:id/rotate", func(c *gin.Context) {
+		current, _ := identity.CurrentAdminFromContext(c)
+		data, e := s.rotateQRCode(c.Request.Context(), current, c.Param("id"))
+		if e != nil {
+			httpx.AbortWithError(c, e)
+			return
+		}
+		httpx.Success(c, http.StatusCreated, data)
 	})
 	admin.POST("/registration-qrcodes/:id/pause", func(c *gin.Context) {
 		current, _ := identity.CurrentAdminFromContext(c)

@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -16,6 +17,8 @@ import (
 )
 
 const currentAdminKey = "identity.currentAdmin"
+
+var errInvalidAdminAuthentication = errors.New("invalid admin authentication")
 
 // CurrentAdmin 保存受保护请求的当前后台用户、会话、角色、权限和数据范围。
 type CurrentAdmin struct {
@@ -34,7 +37,7 @@ func RequireAdminAuthentication(db *gorm.DB, authCfg config.AuthConfig) gin.Hand
 	return func(c *gin.Context) {
 		current, err := authenticateAdmin(c, db, authCfg)
 		if err != nil {
-			httpx.AbortWithError(c, httpx.NewError(http.StatusUnauthorized, "AUTH_TOKEN_EXPIRED", "登录状态已失效"))
+			respondAdminAuthenticationError(c, err)
 			return
 		}
 		if current.MustChangePassword && c.Request.URL.Path != "/api/v1/auth/password/change" {
@@ -44,6 +47,17 @@ func RequireAdminAuthentication(db *gorm.DB, authCfg config.AuthConfig) gin.Hand
 		c.Set(currentAdminKey, current)
 		c.Next()
 	}
+}
+
+// respondAdminAuthenticationError keeps infrastructure failures distinct from
+// an expired or revoked login session. The latter may trigger token refresh in
+// a browser; a database or authorization lookup failure must never do so.
+func respondAdminAuthenticationError(c *gin.Context, err error) {
+	if errors.Is(err, errInvalidAdminAuthentication) || errors.Is(err, gorm.ErrRecordNotFound) {
+		httpx.AbortWithError(c, httpx.NewError(http.StatusUnauthorized, "AUTH_TOKEN_EXPIRED", "登录状态已失效"))
+		return
+	}
+	httpx.AbortWithError(c, httpx.NewError(http.StatusServiceUnavailable, "AUTH_SERVICE_UNAVAILABLE", "登录服务暂不可用，请稍后重试"))
 }
 
 // CurrentAdminFromContext 读取认证中间件写入的当前后台会话信息。
@@ -59,7 +73,7 @@ func CurrentAdminFromContext(c *gin.Context) (CurrentAdmin, bool) {
 func authenticateAdmin(c *gin.Context, db *gorm.DB, authCfg config.AuthConfig) (CurrentAdmin, error) {
 	tokenString := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
 	if tokenString == "" || tokenString == c.GetHeader("Authorization") {
-		return CurrentAdmin{}, fmt.Errorf("missing bearer token")
+		return CurrentAdmin{}, errInvalidAdminAuthentication
 	}
 	claims := jwt.MapClaims{}
 	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (any, error) {
@@ -69,26 +83,26 @@ func authenticateAdmin(c *gin.Context, db *gorm.DB, authCfg config.AuthConfig) (
 		return []byte(authCfg.JWTSecret), nil
 	})
 	if err != nil || !token.Valid || claims["clientType"] != "ADMIN_WEB" {
-		return CurrentAdmin{}, fmt.Errorf("invalid access token")
+		return CurrentAdmin{}, errInvalidAdminAuthentication
 	}
 	userID, ok := parseClaimID(claims["sub"])
 	if !ok {
-		return CurrentAdmin{}, fmt.Errorf("invalid user claim")
+		return CurrentAdmin{}, errInvalidAdminAuthentication
 	}
 	sessionID, ok := parseClaimID(claims["sid"])
 	if !ok {
-		return CurrentAdmin{}, fmt.Errorf("invalid session claim")
+		return CurrentAdmin{}, errInvalidAdminAuthentication
 	}
 	tokenVersion, ok := parseClaimID(claims["tv"])
 	if !ok {
-		return CurrentAdmin{}, fmt.Errorf("invalid token version claim")
+		return CurrentAdmin{}, errInvalidAdminAuthentication
 	}
 	var session authSession
 	if err := db.WithContext(c.Request.Context()).Where("id = ? AND subject_type = ? AND subject_id = ? AND client_type = ? AND status = ? AND expires_at > ?", sessionID, "ADMIN", userID, "ADMIN_WEB", "ACTIVE", time.Now()).First(&session).Error; err != nil {
 		return CurrentAdmin{}, err
 	}
 	if uint64(session.TokenVersion) != tokenVersion {
-		return CurrentAdmin{}, fmt.Errorf("stale token version")
+		return CurrentAdmin{}, errInvalidAdminAuthentication
 	}
 	var user adminUser
 	if err := db.WithContext(c.Request.Context()).Where("id = ? AND status = ?", userID, "ACTIVE").First(&user).Error; err != nil {

@@ -65,6 +65,24 @@ func TestContentSafetyMockOnlyAllowedInTest(t *testing.T) {
 	}
 }
 
+func TestRosterIdentityTencentRequiresCompleteConfiguration(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Avatar.RosterIdentityProvider = "tencent_phone_verification"
+	cfg.Avatar.RosterIdentity = RosterIdentityConfig{Region: "ap-guangzhou", Timeout: 10 * time.Second}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Tencent roster identity provider must require credentials")
+	}
+	cfg.Avatar.RosterIdentity.SecretID = "test-id"
+	cfg.Avatar.RosterIdentity.SecretKey = "test-key"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("complete Tencent roster identity config should be valid: %v", err)
+	}
+	cfg.Avatar.RosterIdentity.VerifyMode = "2"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("unsupported roster identity verify mode must be rejected")
+	}
+}
+
 func TestFileStorageMockOnlyAllowedInTest(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.File.Storage = FileStorageConfig{Provider: "mock", KeyPrefix: "xingyanshu/test", LocalRoot: t.TempDir(), MockUploadBaseURL: "http://127.0.0.1:8080"}
@@ -74,6 +92,21 @@ func TestFileStorageMockOnlyAllowedInTest(t *testing.T) {
 	cfg.App.Environment = "production"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("mock storage must be rejected outside test")
+	}
+}
+
+func TestAvatarAssetStorageCanUseMockWithoutReplacingGlobalCOS(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Avatar.AssetStorage = &FileStorageConfig{Provider: "mock", LocalRoot: t.TempDir(), MockUploadBaseURL: "http://127.0.0.1:8080"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("isolated avatar mock storage should be valid in test: %v", err)
+	}
+	if cfg.File.Storage.Provider != "cos" {
+		t.Fatalf("global storage must remain COS, got %q", cfg.File.Storage.Provider)
+	}
+	cfg.App.Environment = "production"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("avatar mock storage must be rejected outside test")
 	}
 }
 

@@ -12,7 +12,9 @@ import (
 	"xingyanshu-backend/internal/platform/idgen"
 )
 
-func (s *Service) startCollection(ctx context.Context, cur Current) (any, *httpx.AppError) {
+// startCollection opens the one initial collection session. A new session after
+// a completed submission is only allowed through the audited reshoot flow.
+func (s *Service) startCollection(ctx context.Context, cur Current, reshoot bool) (any, *httpx.AppError) {
 	var out gin.H
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var p struct {
@@ -26,6 +28,15 @@ func (s *Service) startCollection(ctx context.Context, cur Current) (any, *httpx
 		}
 		if p.Status == "DELETION_REQUESTED" || p.Status == "DELETION_PROCESSING" || p.Status == "DELETED" {
 			return fmt.Errorf("deleting")
+		}
+		if reshoot {
+			if p.Status != "RESHOOT_REQUIRED" {
+				return fmt.Errorf("reshoot state")
+			}
+		} else if p.Status == "RESHOOT_REQUIRED" {
+			return fmt.Errorf("reshoot required")
+		} else if p.Status != "CONSENT_PENDING" && p.Status != "COLLECTING" {
+			return fmt.Errorf("already submitted")
 		}
 		var consent int64
 		if e := tx.Table("avatar_consent").Where("account_id=? AND profile_id=? AND status='ACTIVE' AND consent_type='COLLECT_AND_ARCHIVE'", cur.AccountID, p.ID).Count(&consent).Error; e != nil {
@@ -62,6 +73,15 @@ func (s *Service) startCollection(ctx context.Context, cur Current) (any, *httpx
 		}
 		if err.Error() == "deleting" {
 			return nil, avatarError(http.StatusConflict, "AVATAR_PROFILE_DELETION_PENDING", "删除申请处理中", nil)
+		}
+		if err.Error() == "already submitted" {
+			return nil, avatarError(http.StatusConflict, "AVATAR_COLLECTION_ALREADY_SUBMITTED", "档案已提交，请查看处理进度", nil)
+		}
+		if err.Error() == "reshoot required" {
+			return nil, avatarError(http.StatusConflict, "AVATAR_RESHOOT_REQUIRED", "当前档案需通过补采流程继续", nil)
+		}
+		if err.Error() == "reshoot state" {
+			return nil, avatarError(http.StatusConflict, "AVATAR_PROFILE_STATE_INVALID", "当前档案状态不可补采", nil)
 		}
 		return nil, avatarError(500, "INTERNAL_ERROR", "创建采集会话失败", nil)
 	}
