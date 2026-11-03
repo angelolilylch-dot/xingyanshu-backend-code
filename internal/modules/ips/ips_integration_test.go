@@ -84,12 +84,16 @@ func TestIPEntryWithMySQL(t *testing.T) {
 	templateID := idgen.Next()
 	versionID := idgen.Next()
 	planID := idgen.Next()
-	fileIDs := []uint64{idgen.Next(), idgen.Next(), idgen.Next(), idgen.Next()}
+	fileIDs := []uint64{idgen.Next(), idgen.Next(), idgen.Next(), idgen.Next(), idgen.Next()}
 	storage := &packageTestStorage{objects: map[string][]byte{}}
 	mustIPExec(t, db.Table("sys_org").Create(map[string]any{"id": cityID, "status": "ACTIVE", "version": 1, "org_code": fmt.Sprintf("TEST_CITY_%d", suffix), "org_name": "IP录入测试城市", "org_type": "CITY", "city_code": "359999"}).Error)
 	defer db.Exec("DELETE FROM sys_org WHERE id = ?", cityID)
 	for i, id := range fileIDs {
-		mustIPExec(t, db.Table("file_object").Create(map[string]any{"id": id, "status": "ACTIVE", "version": 1, "created_by": 10401, "file_no": fmt.Sprintf("IPFILE-%d", id), "storage_key": fmt.Sprintf("test/ip/%d", id), "original_name": fmt.Sprintf("test-%d.pdf", i), "mime_type": "application/pdf", "file_size": 10, "file_hash": fmt.Sprintf("hash-%d", id), "security_level": "PRIVATE", "upload_status": "SUCCESS"}).Error)
+		name, mime, size := fmt.Sprintf("test-%d.pdf", i), "application/pdf", int64(10)
+		if i == 3 {
+			name, mime, size = "creation-process.mp4", "video/mp4", 1024
+		}
+		mustIPExec(t, db.Table("file_object").Create(map[string]any{"id": id, "status": "ACTIVE", "version": 1, "created_by": 10401, "file_no": fmt.Sprintf("IPFILE-%d", id), "storage_key": fmt.Sprintf("test/ip/%d", id), "original_name": name, "mime_type": mime, "file_size": size, "file_hash": fmt.Sprintf("hash-%d", id), "security_level": "PRIVATE", "upload_status": "SUCCESS"}).Error)
 		storage.objects[fmt.Sprintf("test/ip/%d", id)] = []byte(fmt.Sprintf("fixture-%d", i))
 		defer db.Exec("DELETE FROM file_object WHERE id = ?", id)
 	}
@@ -124,6 +128,11 @@ func TestIPEntryWithMySQL(t *testing.T) {
 		t.Fatalf("expected IP and DCI assistance request in one transaction, got %#v", created)
 	}
 	requestID := mustIPID(t, created["dciAssistanceRequestId"].(string))
+	var videoLocked time.Time
+	mustIPExec(t, db.Table("ip_creation_process_video").Where("ip_id=?", ipID).Select("submission_locked_at").Scan(&videoLocked).Error)
+	if videoLocked.IsZero() {
+		t.Fatal("creation process video must be locked with DCI assistance request")
+	}
 	var distributionCount int64
 	mustIPExec(t, db.Table("ip_distribution_item").Where("ip_id=?", ipID).Count(&distributionCount).Error)
 	if distributionCount != 3 {
@@ -335,7 +344,7 @@ func TestIPRoutesDoNotExposeManualListing(t *testing.T) {
 }
 
 func testIPInput(cityID, planVersionID, templateID uint64, fileIDs []uint64) IPInput {
-	return IPInput{IPName: "测试文化IP", IPType: "CULTURAL", SourceType: "CITY_COLLECTION", MainCityOrgID: cityID, ShortIntro: "测试简介", DetailContent: "测试完整介绍", CultureStory: "测试文化故事", IPFeature: "测试特色", CreativeDirections: []string{"文创商品"}, ApplicableProductTypes: []string{"CULTURAL_PRODUCT"}, ApplicableActivityTypes: []string{"EXHIBITION"}, PublicCopyrightNotice: "版权说明", PurchaseNotice: "购买须知", SuggestedTransactionPriceAmount: "199.00", CoverFileID: fileIDs[0], DetailFileIDs: []uint64{fileIDs[1]}, RightHolder: RightHolder{HolderType: "INSTITUTION", HolderName: "测试权利机构", AcquisitionMethod: "ORIGINAL_CREATION", RightsDescription: "测试权属说明"}, RightDocuments: []RightDocument{{DocumentType: "COPYRIGHT_CERTIFICATE", DocumentNo: "RIGHT-TEST-001", FileID: fileIDs[2]}}, MaterialPack: &MaterialPackInput{PackName: "测试入库素材包", Items: []MaterialItemInput{{FileID: fileIDs[1], MaterialRole: "SOURCE", SortNo: 1, Deliverable: true}}}, AuthPlanVersionID: planVersionID, DistributionTemplateID: templateID, DistributionItems: []DistributionItem{{ParticipantType: "RIGHT_HOLDER", Ratio: "0.6"}, {ParticipantType: "CITY_OPERATOR", Ratio: "0.2"}, {ParticipantType: "PLATFORM", Ratio: "0.2"}}}
+	return IPInput{IPName: "测试文化IP", IPType: "CULTURAL", SourceType: "CITY_COLLECTION", MainCityOrgID: cityID, ShortIntro: "测试简介", DetailContent: "测试完整介绍", CultureStory: "测试文化故事", IPFeature: "测试特色", CreativeDirections: []string{"文创商品"}, ApplicableProductTypes: []string{"CULTURAL_PRODUCT"}, ApplicableActivityTypes: []string{"EXHIBITION"}, PublicCopyrightNotice: "版权说明", PurchaseNotice: "购买须知", SuggestedTransactionPriceAmount: "199.00", CoverFileID: fileIDs[0], DetailFileIDs: []uint64{fileIDs[1]}, CreationProcessVideos: []CreationProcessVideoInput{{FileID: fileIDs[3], Description: "草图到成品的关键制作过程", RecordedAt: "2026-10-20"}}, RightHolder: RightHolder{HolderType: "INSTITUTION", HolderName: "测试权利机构", AcquisitionMethod: "ORIGINAL_CREATION", RightsDescription: "测试权属说明"}, RightDocuments: []RightDocument{{DocumentType: "COPYRIGHT_CERTIFICATE", DocumentNo: "RIGHT-TEST-001", FileID: fileIDs[2]}}, MaterialPack: &MaterialPackInput{PackName: "测试入库素材包", Items: []MaterialItemInput{{FileID: fileIDs[1], MaterialRole: "SOURCE", SortNo: 1, Deliverable: true}}}, AuthPlanVersionID: planVersionID, DistributionTemplateID: templateID, DistributionItems: []DistributionItem{{ParticipantType: "RIGHT_HOLDER", Ratio: "0.6"}, {ParticipantType: "CITY_OPERATOR", Ratio: "0.2"}, {ParticipantType: "PLATFORM", Ratio: "0.2"}}}
 }
 func cleanupIP(t *testing.T, db *gorm.DB, ipID uint64) {
 	var packIDs []uint64
@@ -345,7 +354,7 @@ func cleanupIP(t *testing.T, db *gorm.DB, ipID uint64) {
 		db.Table("file_relation").Where("object_type='IP_MATERIAL_PACK' AND object_id=?", packID).Delete(nil)
 	}
 	db.Table("ip_material_pack").Where("ip_id=?", ipID).Delete(nil)
-	for _, table := range []string{"ip_auth_binding", "ip_distribution_item", "ip_draft_auth_selection", "ip_right_document", "ip_right_holder", "ip_dci_assistance_request", "ip_evaluation_report", "ip_review_record"} {
+	for _, table := range []string{"ip_auth_binding", "ip_distribution_item", "ip_draft_auth_selection", "ip_right_document", "ip_right_holder", "ip_dci_assistance_request", "ip_evaluation_report", "ip_review_record", "ip_creation_process_video"} {
 		if err := db.Table(table).Where("ip_id=?", ipID).Delete(nil).Error; err != nil {
 			t.Logf("cleanup %s: %v", table, err)
 		}

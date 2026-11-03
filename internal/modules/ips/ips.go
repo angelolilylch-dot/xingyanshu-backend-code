@@ -89,36 +89,38 @@ type DistributionItem struct {
 	Ratio           string `json:"ratio" binding:"required,max=16"`
 }
 type IPInput struct {
-	IPName                          string             `json:"ipName" binding:"required,max=200"`
-	IPType                          string             `json:"ipType" binding:"required,max=40"`
-	SourceType                      string             `json:"sourceType" binding:"required,max=40"`
-	MainCityOrgID                   uint64             `json:"mainCityOrgId,string" binding:"required"`
-	ShortIntro                      string             `json:"shortIntro" binding:"required,max=500"`
-	DetailContent                   string             `json:"detailContent" binding:"required,max=10000"`
-	CultureStory                    string             `json:"cultureStory" binding:"required,max=10000"`
-	IPFeature                       string             `json:"ipFeature" binding:"required,max=5000"`
-	CreativeDirections              []string           `json:"creativeDirections" binding:"required,min=1"`
-	ApplicableProductTypes          []string           `json:"applicableProductTypes" binding:"required,min=1"`
-	ApplicableActivityTypes         []string           `json:"applicableActivityTypes" binding:"required,min=1"`
-	RegionTagCodes                  []string           `json:"regionTagCodes"`
-	CultureTagCodes                 []string           `json:"cultureTagCodes"`
-	CategoryTagCodes                []string           `json:"categoryTagCodes"`
-	CommercializationTagCodes       []string           `json:"commercializationTagCodes"`
-	PublicCopyrightNotice           string             `json:"publicCopyrightNotice" binding:"required,max=5000"`
-	PurchaseNotice                  string             `json:"purchaseNotice" binding:"required,max=5000"`
-	SuggestedTransactionPriceAmount string             `json:"suggestedTransactionPriceAmount" binding:"required,max=32"`
-	CoverFileID                     uint64             `json:"coverFileId,string" binding:"required"`
-	DetailFileIDs                   StringUint64List   `json:"detailFileIds"`
-	RightHolder                     RightHolder        `json:"rightHolder" binding:"required"`
-	RightDocuments                  []RightDocument    `json:"rightDocuments" binding:"required,min=1"`
-	MaterialPack                    *MaterialPackInput `json:"materialPack" binding:"required"`
-	DCICertificateNo                string             `json:"dciCertificateNo" binding:"omitempty,max=128"`
-	DCICertificateFileID            uint64             `json:"dciCertificateFileId,string"`
-	DCIAssistanceRequested          bool               `json:"dciAssistanceRequested"`
-	DCIAssistanceRequest            *DCIRequest        `json:"dciAssistanceRequest"`
-	AuthPlanVersionID               uint64             `json:"authPlanVersionId,string" binding:"required"`
-	DistributionTemplateID          uint64             `json:"distributionTemplateId,string" binding:"required"`
-	DistributionItems               []DistributionItem `json:"distributionItems" binding:"required,min=1"`
+	IPName                              string                      `json:"ipName" binding:"required,max=200"`
+	IPType                              string                      `json:"ipType" binding:"required,max=40"`
+	SourceType                          string                      `json:"sourceType" binding:"required,max=40"`
+	MainCityOrgID                       uint64                      `json:"mainCityOrgId,string" binding:"required"`
+	ShortIntro                          string                      `json:"shortIntro" binding:"required,max=500"`
+	DetailContent                       string                      `json:"detailContent" binding:"required,max=10000"`
+	CultureStory                        string                      `json:"cultureStory" binding:"required,max=10000"`
+	IPFeature                           string                      `json:"ipFeature" binding:"required,max=5000"`
+	CreativeDirections                  []string                    `json:"creativeDirections" binding:"required,min=1"`
+	ApplicableProductTypes              []string                    `json:"applicableProductTypes" binding:"required,min=1"`
+	ApplicableActivityTypes             []string                    `json:"applicableActivityTypes" binding:"required,min=1"`
+	RegionTagCodes                      []string                    `json:"regionTagCodes"`
+	CultureTagCodes                     []string                    `json:"cultureTagCodes"`
+	CategoryTagCodes                    []string                    `json:"categoryTagCodes"`
+	CommercializationTagCodes           []string                    `json:"commercializationTagCodes"`
+	PublicCopyrightNotice               string                      `json:"publicCopyrightNotice" binding:"required,max=5000"`
+	PurchaseNotice                      string                      `json:"purchaseNotice" binding:"required,max=5000"`
+	SuggestedTransactionPriceAmount     string                      `json:"suggestedTransactionPriceAmount" binding:"required,max=32"`
+	CoverFileID                         uint64                      `json:"coverFileId,string" binding:"required"`
+	DetailFileIDs                       StringUint64List            `json:"detailFileIds"`
+	CreationProcessVideos               []CreationProcessVideoInput `json:"creationProcessVideos"`
+	CreationProcessVideoExemptionReason string                      `json:"creationProcessVideoExemptionReason" binding:"omitempty,max=500"`
+	RightHolder                         RightHolder                 `json:"rightHolder" binding:"required"`
+	RightDocuments                      []RightDocument             `json:"rightDocuments" binding:"required,min=1"`
+	MaterialPack                        *MaterialPackInput          `json:"materialPack" binding:"required"`
+	DCICertificateNo                    string                      `json:"dciCertificateNo" binding:"omitempty,max=128"`
+	DCICertificateFileID                uint64                      `json:"dciCertificateFileId,string"`
+	DCIAssistanceRequested              bool                        `json:"dciAssistanceRequested"`
+	DCIAssistanceRequest                *DCIRequest                 `json:"dciAssistanceRequest"`
+	AuthPlanVersionID                   uint64                      `json:"authPlanVersionId,string" binding:"required"`
+	DistributionTemplateID              uint64                      `json:"distributionTemplateId,string" binding:"required"`
+	DistributionItems                   []DistributionItem          `json:"distributionItems" binding:"required,min=1"`
 }
 type SubmitRequest struct {
 	Comment string `json:"comment" binding:"required,max=500"`
@@ -200,6 +202,9 @@ func (s *Service) Create(ctx context.Context, current identity.CurrentAdmin, inp
 		if err := s.replaceRelated(tx, id, current.UserID, input); err != nil {
 			return err
 		}
+		if err := s.replaceCreationProcessVideos(tx, id, current.UserID, input.CreationProcessVideos); err != nil {
+			return err
+		}
 		manifestHash, replaceErr := s.replaceMaterialPack(tx, id, current.UserID, input.MaterialPack)
 		if replaceErr != nil {
 			return replaceErr
@@ -207,6 +212,9 @@ func (s *Service) Create(ctx context.Context, current identity.CurrentAdmin, inp
 		if input.DCIAssistanceRequested {
 			var createErr error
 			if _, createErr = s.lockMaterialPack(tx, id, now); createErr != nil {
+				return createErr
+			}
+			if createErr = s.lockCreationProcessVideos(tx, id, now); createErr != nil {
 				return createErr
 			}
 			assistanceID, createErr = s.createDCIAssistanceRequest(tx, current, id, *input.DCIAssistanceRequest, manifestHash, now, clientIP)
@@ -257,6 +265,11 @@ func (s *Service) Update(ctx context.Context, current identity.CurrentAdmin, id 
 	} else if locked {
 		return nil, "MATERIAL_PACK_LOCKED", nil
 	}
+	if locked, err := s.creationProcessVideosLocked(ctx, id); err != nil {
+		return nil, "INTERNAL_ERROR", err
+	} else if locked {
+		return nil, "IP_CREATION_PROCESS_VIDEO_LOCKED", nil
+	}
 	if code := s.validateInput(ctx, input); code != "" {
 		return nil, code, nil
 	}
@@ -279,6 +292,9 @@ func (s *Service) Update(ctx context.Context, current identity.CurrentAdmin, id 
 			return err
 		}
 		if err := s.replaceRelated(tx, id, current.UserID, input); err != nil {
+			return err
+		}
+		if err := s.replaceCreationProcessVideos(tx, id, current.UserID, input.CreationProcessVideos); err != nil {
 			return err
 		}
 		if _, err := s.replaceMaterialPack(tx, id, current.UserID, input.MaterialPack); err != nil {
@@ -315,12 +331,18 @@ func (s *Service) Submit(ctx context.Context, current identity.CurrentAdmin, id 
 	if asset.DCICertificateNo == "" || asset.DCICertificateFileID == 0 || asset.DCICertificateStatus != "UPLOADED" {
 		return nil, "IP_DCI_CERTIFICATE_REQUIRED", nil
 	}
+	if code, err := s.validateCreationProcessVideoPrerequisite(ctx, id); err != nil || code != "" {
+		return nil, code, err
+	}
 	if code, err := s.moderate(ctx, id, current.UserID, input.Comment); code != "" {
 		return nil, code, err
 	}
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if _, err := s.lockMaterialPack(tx, id, time.Now()); err != nil {
 			return fmt.Errorf("db.lock_material_pack: %w", err)
+		}
+		if err := s.lockCreationProcessVideos(tx, id, time.Now()); err != nil {
+			return fmt.Errorf("db.lock_creation_process_videos: %w", err)
 		}
 		if err := tx.Table("ip_asset").Where("id=? AND version=?", id, version).Updates(map[string]any{"status": "PENDING_COMPLIANCE", "version": version + 1, "updated_by": current.UserID, "status_reason": input.Comment, "status_changed_at": time.Now(), "status_changed_by_type": "USER", "status_changed_by_id": fmt.Sprint(current.UserID)}).Error; err != nil {
 			return fmt.Errorf("db.update_ip_status: %w", err)
@@ -341,7 +363,7 @@ func (s *Service) Submit(ctx context.Context, current identity.CurrentAdmin, id 
 }
 
 func submitFailureStage(err error) string {
-	for _, stage := range []string{"db.lock_material_pack", "db.update_ip_status", "db.status_history", "db.audit_write"} {
+	for _, stage := range []string{"db.lock_material_pack", "db.lock_creation_process_videos", "db.update_ip_status", "db.status_history", "db.audit_write"} {
 		if strings.Contains(err.Error(), stage+":") {
 			return stage
 		}
@@ -419,6 +441,9 @@ func (s *Service) CreateDCIAssistance(ctx context.Context, current identity.Curr
 	if !validDCIAssistanceRequest(input) {
 		return nil, "VALIDATION_FORMAT_INVALID", nil
 	}
+	if code, err := s.validateCreationProcessVideoPrerequisite(ctx, ipID); err != nil || code != "" {
+		return nil, code, err
+	}
 	if strings.TrimSpace(input.RequestNote) != "" {
 		if code, err := s.moderate(ctx, ipID, current.UserID, input.RequestNote); code != "" {
 			return nil, code, err
@@ -437,6 +462,9 @@ func (s *Service) CreateDCIAssistance(ctx context.Context, current identity.Curr
 		now := time.Now()
 		manifestHash, lockErr := s.lockMaterialPack(tx, ipID, now)
 		if lockErr != nil {
+			return lockErr
+		}
+		if lockErr = s.lockCreationProcessVideos(tx, ipID, now); lockErr != nil {
 			return lockErr
 		}
 		item := map[string]any{"id": id, "status": "PENDING", "version": 1, "created_by": current.UserID, "request_no": fmt.Sprintf("DCI-%d", id), "ip_id": ipID, "contact_name_cipher": nameCipher, "contact_name_masked": mask(input.ContactName), "contact_mobile_cipher": mobileCipher, "contact_mobile_masked": maskMobile(input.ContactMobile), "preferred_contact_time": input.PreferredContactTime, "request_note": input.RequestNote, "submission_manifest_hash": manifestHash, "submission_locked_at": now, "handling_status": "PENDING"}
@@ -569,6 +597,9 @@ func (s *Service) Get(ctx context.Context, current identity.CurrentAdmin, id uin
 		result["materialPack"] = apiresponse.CamelizeMap(materialPack)
 		result["materialItems"] = apiresponse.CamelizeMaps(materialItems)
 	}
+	var creationProcessVideos []map[string]any
+	s.db.WithContext(ctx).Table("ip_creation_process_video v").Select("v.id,v.file_id,v.file_hash,v.description,DATE_FORMAT(v.recorded_at, '%Y-%m-%d') AS recorded_at,v.sort_no,v.submission_locked_at,f.original_name,f.mime_type,f.file_size").Joins("JOIN file_object f ON f.id=v.file_id").Where("v.ip_id=?", id).Order("v.sort_no,v.id").Find(&creationProcessVideos)
+	result["creationProcessVideos"] = apiresponse.CamelizeMaps(creationProcessVideos)
 	if rightsEvidence["id"] != nil {
 		result["rightsEvidence"] = apiresponse.CamelizeMap(rightsEvidence)
 	}
@@ -616,6 +647,9 @@ func (s *Service) validateInput(ctx context.Context, input IPInput) string {
 	}
 	if input.DCICertificateFileID != 0 && !s.fileActive(ctx, input.DCICertificateFileID) {
 		return "DCI_CERTIFICATE_FILE_NOT_FOUND"
+	}
+	if code := s.validateCreationProcessVideos(ctx, input); code != "" {
+		return code
 	}
 	if input.DCIAssistanceRequested {
 		if input.DCIAssistanceRequest == nil || strings.TrimSpace(input.DCICertificateNo) != "" || input.DCICertificateFileID != 0 || !validDCIAssistanceRequest(*input.DCIAssistanceRequest) {
@@ -776,11 +810,16 @@ func (input IPInput) assetValues(id, userID uint64, now time.Time) (map[string]a
 	commercial, _ := enc(input.CommercializationTagCodes)
 	dciStatus := input.initialDCIStatus()
 	values := map[string]any{"id": id, "status": "DRAFT", "version": 1, "created_by": userID, "created_at": now, "ip_no": fmt.Sprintf("IP-%d", id), "ip_name": input.IPName, "ip_type": input.IPType, "source_type": input.SourceType, "main_city_org_id": input.MainCityOrgID, "cover_file_id": input.CoverFileID, "short_intro": input.ShortIntro, "detail_content": input.DetailContent, "culture_story": input.CultureStory, "ip_feature": input.IPFeature, "creative_directions_json": creative, "applicable_product_types_json": product, "applicable_activity_types_json": activity, "region_tag_codes_json": region, "culture_tag_codes_json": culture, "category_tag_codes_json": category, "commercialization_tag_codes_json": commercial, "public_copyright_notice": input.PublicCopyrightNotice, "purchase_notice": input.PurchaseNotice, "dci_certificate_status": dciStatus, "dci_certificate_no": nullable(input.DCICertificateNo), "dci_certificate_file_id": nullableID(input.DCICertificateFileID), "authorization_mode": "PENDING_SELECTION", "mall_visible": false}
+	values["creation_process_video_exemption_reason"] = nullable(input.CreationProcessVideoExemptionReason)
 	values["suggested_transaction_price_amount"] = input.SuggestedTransactionPriceAmount
 	return values, nil
 }
 func (input IPInput) textForModeration() string {
 	values := append([]string{input.IPName, input.ShortIntro, input.DetailContent, input.CultureStory, input.IPFeature, input.PublicCopyrightNotice, input.PurchaseNotice, input.RightHolder.HolderName, input.RightHolder.RightsDescription}, input.CreativeDirections...)
+	values = append(values, input.CreationProcessVideoExemptionReason)
+	for _, video := range input.CreationProcessVideos {
+		values = append(values, video.Description)
+	}
 	if input.DCIAssistanceRequest != nil {
 		values = append(values, input.DCIAssistanceRequest.RequestNote)
 	}

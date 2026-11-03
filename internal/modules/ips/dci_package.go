@@ -86,61 +86,64 @@ func (s *Service) CreateDCIAssistancePackage(ctx context.Context, current identi
 }
 
 type dciPackageData struct {
-	RequestNo            string
-	IPNo                 string
-	IPName               string
-	IPType               string
-	SourceType           string
-	CityOrgName          string
-	ContactName          string
-	ContactMobile        string
-	PreferredContactTime string
-	RequestNote          string
-	HolderName           string
-	HolderType           string
-	AcquisitionMethod    string
-	RightsDescription    string
-	ShortIntro           string
-	DetailContent        string
-	CultureStory         string
-	IPFeature            string
-	CreativeDirections   string
-	RightDocuments       []string
-	MaterialManifestHash string
-	MaterialItems        []string
-	EvaluationReports    []string
+	RequestNo                           string
+	IPNo                                string
+	IPName                              string
+	IPType                              string
+	SourceType                          string
+	CityOrgName                         string
+	ContactName                         string
+	ContactMobile                       string
+	PreferredContactTime                string
+	RequestNote                         string
+	HolderName                          string
+	HolderType                          string
+	AcquisitionMethod                   string
+	RightsDescription                   string
+	ShortIntro                          string
+	DetailContent                       string
+	CultureStory                        string
+	IPFeature                           string
+	CreativeDirections                  string
+	RightDocuments                      []string
+	MaterialManifestHash                string
+	MaterialItems                       []string
+	CreationProcessVideos               []string
+	CreationProcessVideoExemptionReason string
+	EvaluationReports                   []string
 }
 
 func (s *Service) loadDCIPackageData(ctx context.Context, requestID uint64, includeEvaluation bool) (dciPackageData, []dciPackageSource, string, error) {
 	var row struct {
-		RequestNo            string `gorm:"column:request_no"`
-		IPID                 uint64 `gorm:"column:ip_id"`
-		HandlingStatus       string `gorm:"column:handling_status"`
-		ContactNameCipher    []byte `gorm:"column:contact_name_cipher"`
-		ContactMobileCipher  []byte `gorm:"column:contact_mobile_cipher"`
-		PreferredContactTime string `gorm:"column:preferred_contact_time"`
-		RequestNote          string `gorm:"column:request_note"`
-		IPNo                 string `gorm:"column:ip_no"`
-		IPName               string `gorm:"column:ip_name"`
-		IPType               string `gorm:"column:ip_type"`
-		SourceType           string `gorm:"column:source_type"`
-		CityOrgName          string `gorm:"column:city_org_name"`
-		HolderNameCipher     []byte `gorm:"column:holder_name_cipher"`
-		HolderType           string `gorm:"column:holder_type"`
-		AcquisitionMethod    string `gorm:"column:acquisition_method"`
-		RightsDescription    string `gorm:"column:rights_description"`
-		ShortIntro           string `gorm:"column:short_intro"`
-		DetailContent        string `gorm:"column:detail_content"`
-		CultureStory         string `gorm:"column:culture_story"`
-		IPFeature            string `gorm:"column:ip_feature"`
-		CreativeDirections   string `gorm:"column:creative_directions_json"`
+		RequestNo                           string `gorm:"column:request_no"`
+		IPID                                uint64 `gorm:"column:ip_id"`
+		HandlingStatus                      string `gorm:"column:handling_status"`
+		ContactNameCipher                   []byte `gorm:"column:contact_name_cipher"`
+		ContactMobileCipher                 []byte `gorm:"column:contact_mobile_cipher"`
+		PreferredContactTime                string `gorm:"column:preferred_contact_time"`
+		RequestNote                         string `gorm:"column:request_note"`
+		IPNo                                string `gorm:"column:ip_no"`
+		IPName                              string `gorm:"column:ip_name"`
+		IPType                              string `gorm:"column:ip_type"`
+		SourceType                          string `gorm:"column:source_type"`
+		CityOrgName                         string `gorm:"column:city_org_name"`
+		HolderNameCipher                    []byte `gorm:"column:holder_name_cipher"`
+		HolderType                          string `gorm:"column:holder_type"`
+		AcquisitionMethod                   string `gorm:"column:acquisition_method"`
+		RightsDescription                   string `gorm:"column:rights_description"`
+		ShortIntro                          string `gorm:"column:short_intro"`
+		DetailContent                       string `gorm:"column:detail_content"`
+		CultureStory                        string `gorm:"column:culture_story"`
+		IPFeature                           string `gorm:"column:ip_feature"`
+		CreationProcessVideoExemptionReason string `gorm:"column:creation_process_video_exemption_reason"`
+		CreativeDirections                  string `gorm:"column:creative_directions_json"`
 	}
 	err := s.db.WithContext(ctx).Table("ip_dci_assistance_request r").
 		Joins("JOIN ip_asset a ON a.id=r.ip_id").
 		Joins("LEFT JOIN sys_org o ON o.id=a.main_city_org_id").
 		Joins("JOIN ip_right_holder h ON h.ip_id=a.id").
 		Where("r.id=?", requestID).
-		Select("r.request_no,r.ip_id,r.handling_status,r.contact_name_cipher,r.contact_mobile_cipher,r.preferred_contact_time,r.request_note,a.ip_no,a.ip_name,a.ip_type,a.source_type,o.org_name AS city_org_name,h.holder_name_cipher,h.holder_type,h.acquisition_method,h.rights_description,a.short_intro,a.detail_content,a.culture_story,a.ip_feature,a.creative_directions_json").
+		Select("r.request_no,r.ip_id,r.handling_status,r.contact_name_cipher,r.contact_mobile_cipher,r.preferred_contact_time,r.request_note,a.ip_no,a.ip_name,a.ip_type,a.source_type,o.org_name AS city_org_name,h.holder_name_cipher,h.holder_type,h.acquisition_method,h.rights_description,a.short_intro,a.detail_content,a.culture_story,a.ip_feature,a.creation_process_video_exemption_reason,a.creative_directions_json").
 		Take(&row).Error
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
@@ -163,7 +166,7 @@ func (s *Service) loadDCIPackageData(ctx context.Context, requestID uint64, incl
 	if err != nil {
 		return dciPackageData{}, nil, "INTERNAL_ERROR", err
 	}
-	data := dciPackageData{RequestNo: row.RequestNo, IPNo: row.IPNo, IPName: row.IPName, IPType: row.IPType, SourceType: row.SourceType, CityOrgName: row.CityOrgName, ContactName: contactName, ContactMobile: contactMobile, PreferredContactTime: row.PreferredContactTime, RequestNote: row.RequestNote, HolderName: holderName, HolderType: row.HolderType, AcquisitionMethod: row.AcquisitionMethod, RightsDescription: row.RightsDescription, ShortIntro: row.ShortIntro, DetailContent: row.DetailContent, CultureStory: row.CultureStory, IPFeature: row.IPFeature, CreativeDirections: row.CreativeDirections}
+	data := dciPackageData{RequestNo: row.RequestNo, IPNo: row.IPNo, IPName: row.IPName, IPType: row.IPType, SourceType: row.SourceType, CityOrgName: row.CityOrgName, ContactName: contactName, ContactMobile: contactMobile, PreferredContactTime: row.PreferredContactTime, RequestNote: row.RequestNote, HolderName: holderName, HolderType: row.HolderType, AcquisitionMethod: row.AcquisitionMethod, RightsDescription: row.RightsDescription, ShortIntro: row.ShortIntro, DetailContent: row.DetailContent, CultureStory: row.CultureStory, IPFeature: row.IPFeature, CreativeDirections: row.CreativeDirections, CreationProcessVideoExemptionReason: row.CreationProcessVideoExemptionReason}
 	sources := make([]dciPackageSource, 0)
 
 	var rights []struct {
@@ -218,6 +221,18 @@ func (s *Service) loadDCIPackageData(ctx context.Context, requestID uint64, incl
 	for _, item := range materialItems {
 		data.MaterialItems = append(data.MaterialItems, fmt.Sprintf("- %s：%s（SHA-256：%s）", item.MaterialRole, item.OriginalName, item.FileHash))
 		sources = append(sources, dciPackageSource{FileID: item.FileID, StorageKey: item.StorageKey, OriginalName: item.OriginalName, Folder: "03_素材包", Label: item.MaterialRole})
+	}
+	var videos []struct {
+		Description, StorageKey, OriginalName, FileHash string
+		FileID                                          uint64
+		SortNo                                          int
+	}
+	if err := s.db.WithContext(ctx).Table("ip_creation_process_video v").Joins("JOIN file_object f ON f.id=v.file_id AND f.status='ACTIVE' AND f.upload_status='SUCCESS'").Where("v.ip_id=? AND v.submission_locked_at IS NOT NULL", row.IPID).Select("v.description,v.sort_no,v.file_id,v.file_hash,f.storage_key,f.original_name").Order("v.sort_no,v.id").Scan(&videos).Error; err != nil {
+		return dciPackageData{}, nil, "INTERNAL_ERROR", err
+	}
+	for _, item := range videos {
+		data.CreationProcessVideos = append(data.CreationProcessVideos, fmt.Sprintf("- %s（SHA-256：%s）", item.Description, item.FileHash))
+		sources = append(sources, dciPackageSource{FileID: item.FileID, StorageKey: item.StorageKey, OriginalName: item.OriginalName, Folder: "04_创作过程视频", Label: fmt.Sprintf("过程视频_%02d", item.SortNo+1)})
 	}
 	if includeEvaluation {
 		var reports []struct {
@@ -291,6 +306,11 @@ func renderDCIPackageMarkdown(data dciPackageData) string {
 		"## 联系与代办说明", fmt.Sprintf("- 联系人：%s", data.ContactName), fmt.Sprintf("- 联系电话：%s", data.ContactMobile), fmt.Sprintf("- 期望联系时间：%s", valueOrDash(data.PreferredContactTime)), fmt.Sprintf("- 代办说明：%s", valueOrDash(data.RequestNote)), "",
 		"## 原始权利人", fmt.Sprintf("- 名称：%s", data.HolderName), fmt.Sprintf("- 主体类型：%s", data.HolderType), fmt.Sprintf("- 权利取得方式：%s", data.AcquisitionMethod), fmt.Sprintf("- 权属说明：%s", data.RightsDescription), "",
 		"## 权属证明材料", strings.Join(data.RightDocuments, "\n"), "", "## IP 作品资料", "- 详见 `02_IP作品资料/IP作品说明.md` 及同目录附件。", "", "## 锁定素材包", fmt.Sprintf("- 素材清单 SHA-256：%s", data.MaterialManifestHash), "- 素材文件详见 `03_素材包/`：", strings.Join(data.MaterialItems, "\n"),
+	}
+	if len(data.CreationProcessVideos) > 0 {
+		lines = append(lines, "", "## 创作过程视频", "- 视频文件详见 `04_创作过程视频/`：", strings.Join(data.CreationProcessVideos, "\n"))
+	} else if strings.TrimSpace(data.CreationProcessVideoExemptionReason) != "" {
+		lines = append(lines, "", "## 创作过程视频豁免说明", data.CreationProcessVideoExemptionReason)
 	}
 	if len(data.EvaluationReports) > 0 {
 		lines = append(lines, "", "## 附带评估报告", strings.Join(data.EvaluationReports, "\n"))

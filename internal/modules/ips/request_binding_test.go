@@ -24,6 +24,7 @@ func TestIPInputAcceptsStringDetailFileIDs(t *testing.T) {
 		"suggestedTransactionPriceAmount":"15555",
 		"coverFileId":"1789459883988179200",
 		"detailFileIds":["1789459886398697500"],
+		"creationProcessVideos":[{"fileId":"1789459886398697501","description":"草图到成品的关键过程","recordedAt":"2026-10-20"}],
 		"rightHolder":{"holderType":"PERSONAL","holderName":"权利人","acquisitionMethod":"TRANSFER","rightsDescription":"权属说明"},
 		"rightDocuments":[{"documentType":"COPYRIGHT_REGISTRATION","documentNo":"125125125","validFrom":"2026-09-03","validTo":"2026-09-08","fileId":"1789459894089989100"}],
 		"dciCertificateNo":"14551",
@@ -37,6 +38,9 @@ func TestIPInputAcceptsStringDetailFileIDs(t *testing.T) {
 	}
 	if len(input.DetailFileIDs) != 1 || input.DetailFileIDs[0] != 1789459886398697500 {
 		t.Fatalf("unexpected detailFileIds: %#v", input.DetailFileIDs)
+	}
+	if len(input.CreationProcessVideos) != 1 || input.CreationProcessVideos[0].FileID != 1789459886398697501 {
+		t.Fatalf("unexpected creationProcessVideos: %#v", input.CreationProcessVideos)
 	}
 }
 

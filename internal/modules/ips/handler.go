@@ -296,13 +296,13 @@ func executeIdempotent(c *gin.Context, current identity.CurrentAdmin, db *gorm.D
 
 func ipErrorStatus(code string) int {
 	switch code {
-	case "RESOURCE_NOT_FOUND", "IP_NOT_FOUND", "COVER_FILE_NOT_FOUND", "RIGHT_DOCUMENT_FILE_NOT_FOUND", "DETAIL_FILE_NOT_FOUND", "DCI_CERTIFICATE_FILE_NOT_FOUND", "EVALUATION_REPORT_FILE_NOT_FOUND", "AUTH_PLAN_VERSION_NOT_FOUND", "DISTRIBUTION_PLAN_NOT_FOUND", "DCI_ASSISTANCE_REQUEST_NOT_FOUND", "MATERIAL_ITEM_FILE_NOT_FOUND":
+	case "RESOURCE_NOT_FOUND", "IP_NOT_FOUND", "COVER_FILE_NOT_FOUND", "RIGHT_DOCUMENT_FILE_NOT_FOUND", "DETAIL_FILE_NOT_FOUND", "DCI_CERTIFICATE_FILE_NOT_FOUND", "EVALUATION_REPORT_FILE_NOT_FOUND", "AUTH_PLAN_VERSION_NOT_FOUND", "DISTRIBUTION_PLAN_NOT_FOUND", "DCI_ASSISTANCE_REQUEST_NOT_FOUND", "MATERIAL_ITEM_FILE_NOT_FOUND", "IP_CREATION_PROCESS_VIDEO_FILE_NOT_FOUND":
 		return http.StatusNotFound
 	case "AUTH_FORBIDDEN":
 		return http.StatusForbidden
 	case "VERSION_CONFLICT":
 		return http.StatusConflict
-	case "STATE_TRANSITION_NOT_ALLOWED", "IP_DCI_CERTIFICATE_REQUIRED", "IP_LISTING_PREREQUISITE_MISSING", "CONTENT_DETECTION_REJECTED", "CONTENT_DETECTION_UNAVAILABLE", "DCI_PACKAGE_SOURCE_MISSING", "MATERIAL_PACK_REQUIRED", "MATERIAL_PACK_LOCKED":
+	case "STATE_TRANSITION_NOT_ALLOWED", "IP_DCI_CERTIFICATE_REQUIRED", "IP_LISTING_PREREQUISITE_MISSING", "CONTENT_DETECTION_REJECTED", "CONTENT_DETECTION_UNAVAILABLE", "DCI_PACKAGE_SOURCE_MISSING", "MATERIAL_PACK_REQUIRED", "MATERIAL_PACK_LOCKED", "IP_CREATION_PROCESS_VIDEO_REQUIRED", "IP_CREATION_PROCESS_VIDEO_EXEMPTION_REQUIRED", "IP_CREATION_PROCESS_VIDEO_LOCKED", "IP_CREATION_PROCESS_VIDEO_INVALID_TYPE", "IP_CREATION_PROCESS_VIDEO_TOO_LARGE", "IP_CREATION_PROCESS_VIDEO_TOTAL_SIZE_EXCEEDED", "IP_CREATION_PROCESS_VIDEO_COUNT_EXCEEDED":
 		return http.StatusUnprocessableEntity
 	case "EXTERNAL_SERVICE_UNAVAILABLE", "EVIDENCE_UNAVAILABLE", "EVIDENCE_NOT_CONFIRMED", "DCI_PACKAGE_STORAGE_FAILED":
 		return http.StatusBadGateway
@@ -366,6 +366,22 @@ func respond(c *gin.Context, status int, data map[string]any, code string, err e
 		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, code, "DCI证书文件不存在或不可用", map[string]any{"resourceType": "FILE", "field": "dciCertificateFileId"}))
 	case "MATERIAL_ITEM_FILE_NOT_FOUND":
 		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, code, "素材包文件不存在或不可用", map[string]any{"resourceType": "FILE", "field": "materialPack.items[].fileId"}))
+	case "IP_CREATION_PROCESS_VIDEO_FILE_NOT_FOUND":
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, code, "创作过程视频不存在或未上传完成", map[string]any{"resourceType": "FILE", "field": "creationProcessVideos[].fileId"}))
+	case "IP_CREATION_PROCESS_VIDEO_REQUIRED":
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusUnprocessableEntity, code, "原始创作的IP必须至少上传一段创作过程视频", map[string]any{"field": "creationProcessVideos", "maxCount": 3, "maxTotalSizeBytes": 104857600}))
+	case "IP_CREATION_PROCESS_VIDEO_EXEMPTION_REQUIRED":
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusUnprocessableEntity, code, "未上传创作过程视频时，请填写无法提供原因", map[string]any{"field": "creationProcessVideoExemptionReason"}))
+	case "IP_CREATION_PROCESS_VIDEO_INVALID_TYPE":
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusUnprocessableEntity, code, "创作过程视频仅支持MP4格式", map[string]any{"field": "creationProcessVideos[].fileId", "allowedMimeType": "video/mp4"}))
+	case "IP_CREATION_PROCESS_VIDEO_TOO_LARGE":
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusUnprocessableEntity, code, "单个创作过程视频不得超过100MB", map[string]any{"field": "creationProcessVideos[].fileId", "maxSizeBytes": 104857600}))
+	case "IP_CREATION_PROCESS_VIDEO_TOTAL_SIZE_EXCEEDED":
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusUnprocessableEntity, code, "创作过程视频总大小不得超过100MB", map[string]any{"field": "creationProcessVideos", "maxTotalSizeBytes": 104857600}))
+	case "IP_CREATION_PROCESS_VIDEO_COUNT_EXCEEDED":
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusUnprocessableEntity, code, "创作过程视频最多上传3段", map[string]any{"field": "creationProcessVideos", "maxCount": 3}))
+	case "IP_CREATION_PROCESS_VIDEO_LOCKED":
+		httpx.AbortWithError(c, httpx.NewError(http.StatusUnprocessableEntity, code, "创作过程视频已随提交审核或DCI代办锁定，不能替换"))
 	case "EVALUATION_REPORT_FILE_NOT_FOUND":
 		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, code, "评估报告文件不存在或不可用", map[string]any{"resourceType": "FILE", "field": "fileId"}))
 	case "AUTH_PLAN_VERSION_NOT_FOUND":
