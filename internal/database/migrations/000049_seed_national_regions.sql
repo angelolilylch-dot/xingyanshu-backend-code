@@ -3434,4 +3434,3 @@ VALUES
 ON DUPLICATE KEY UPDATE
   `dict_name` = VALUES(`dict_name`),
   `sort_no` = VALUES(`sort_no`);
-
