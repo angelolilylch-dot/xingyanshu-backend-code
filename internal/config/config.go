@@ -29,8 +29,17 @@ type Config struct {
 	File          FileConfig          `yaml:"file"`
 	ContentSafety ContentSafetyConfig `yaml:"content_safety"`
 	Evidence      EvidenceConfig      `yaml:"evidence"`
+	Logistics     LogisticsConfig     `yaml:"logistics"`
+	AfterSale     AfterSaleConfig     `yaml:"after_sale"`
+	Activity      ActivityConfig      `yaml:"activity"`
 	Avatar        AvatarConfig        `yaml:"avatar"`
 	Bootstrap     BootstrapConfig     `yaml:"bootstrap"`
+}
+
+// ActivityConfig holds the consumer H5 entry used by the persistent venue
+// check-in QR code. It is public routing information, never a credential.
+type ActivityConfig struct {
+	CheckinH5URL string `yaml:"checkin_h5_url"`
 }
 
 // AvatarConfig controls public support information and abuse-protection limits
@@ -120,10 +129,44 @@ type ContentSafetyConfig struct {
 	Timeout   time.Duration `yaml:"timeout"`
 }
 
-// EvidenceConfig 为真实存证链服务预留接入参数。当前尚未确定服务商，禁止用配置伪造成功回执。
+// EvidenceConfig 保存可信存证服务的连接与签名材料。密钥只允许来自部署环境变量。
 type EvidenceConfig struct {
-	Provider       string `yaml:"provider"`
-	CallbackSecret string `yaml:"callback_secret"`
+	Provider       string        `yaml:"provider"`
+	CallbackSecret string        `yaml:"callback_secret"`
+	Endpoint       string        `yaml:"endpoint"`
+	SecretID       string        `yaml:"secret_id"`
+	SecretKey      string        `yaml:"secret_key"`
+	PublicKey      string        `yaml:"public_key"`
+	PrivateKey     string        `yaml:"private_key"`
+	Timeout        time.Duration `yaml:"timeout"`
+}
+
+// LogisticsConfig configures the purchased Tencent Cloud Marketplace tracking
+// API. Credentials are private deployment values and must never be sent to H5.
+type LogisticsConfig struct {
+	Provider         string        `yaml:"provider"`
+	Endpoint         string        `yaml:"endpoint"`
+	SecretID         string        `yaml:"secret_id"`
+	SecretKey        string        `yaml:"secret_key"`
+	Timeout          time.Duration `yaml:"timeout"`
+	PollInterval     time.Duration `yaml:"poll_interval"`
+	AutoConfirmAfter time.Duration `yaml:"auto_confirm_after"`
+}
+
+// AfterSaleConfig contains the platform-operated return address. It is kept in
+// the private deployment YAML and copied into a ticket snapshot when the consumer
+// applies, so later configuration changes cannot affect historical cases.
+type AfterSaleConfig struct {
+	ReturnAddress ReturnAddressConfig `yaml:"return_address"`
+}
+
+type ReturnAddressConfig struct {
+	RecipientName string `yaml:"recipient_name" json:"recipientName"`
+	Mobile        string `yaml:"mobile" json:"mobile"`
+	ProvinceCode  string `yaml:"province_code" json:"provinceCode"`
+	CityCode      string `yaml:"city_code" json:"cityCode"`
+	DistrictCode  string `yaml:"district_code" json:"districtCode"`
+	DetailAddress string `yaml:"detail_address" json:"detailAddress"`
 }
 
 // FileConfig 保存文件存储连接和上传策略。只有 Policy 会被运行时热加载，存储连接配置仍需重启生效。
@@ -242,6 +285,64 @@ func expandEnvironment(cfg *Config) {
 	cfg.ContentSafety.SecretID = os.ExpandEnv(cfg.ContentSafety.SecretID)
 	cfg.ContentSafety.SecretKey = os.ExpandEnv(cfg.ContentSafety.SecretKey)
 	cfg.Evidence.CallbackSecret = os.ExpandEnv(cfg.Evidence.CallbackSecret)
+	cfg.Evidence.Endpoint = os.ExpandEnv(cfg.Evidence.Endpoint)
+	cfg.Evidence.SecretID = os.ExpandEnv(cfg.Evidence.SecretID)
+	cfg.Evidence.SecretKey = os.ExpandEnv(cfg.Evidence.SecretKey)
+	cfg.Evidence.PublicKey = os.ExpandEnv(cfg.Evidence.PublicKey)
+	cfg.Evidence.PrivateKey = os.ExpandEnv(cfg.Evidence.PrivateKey)
+	if value := strings.TrimSpace(os.Getenv("XINGYANSHU_EVIDENCE_PROVIDER")); value != "" {
+		cfg.Evidence.Provider = value
+	}
+	if value := strings.TrimSpace(os.Getenv("XINGYANSHU_EVIDENCE_ENDPOINT")); value != "" {
+		cfg.Evidence.Endpoint = value
+	}
+	if value := strings.TrimSpace(os.Getenv("XINGYANSHU_EVIDENCE_SECRET_ID")); value != "" {
+		cfg.Evidence.SecretID = value
+	}
+	if value := strings.TrimSpace(os.Getenv("XINGYANSHU_EVIDENCE_SECRET_KEY")); value != "" {
+		cfg.Evidence.SecretKey = value
+	}
+	if value := strings.TrimSpace(os.Getenv("XINGYANSHU_EVIDENCE_PUBLIC_KEY")); value != "" {
+		cfg.Evidence.PublicKey = value
+	}
+	if value := os.Getenv("XINGYANSHU_EVIDENCE_PRIVATE_KEY"); value != "" {
+		cfg.Evidence.PrivateKey = value
+	}
+	if value := strings.TrimSpace(os.Getenv("XINGYANSHU_EVIDENCE_TIMEOUT")); value != "" {
+		if timeout, err := time.ParseDuration(value); err == nil {
+			cfg.Evidence.Timeout = timeout
+		}
+	}
+	// ZXC_* is accepted as a deployment-friendly alias for the vendor integration.
+	if value := strings.TrimSpace(os.Getenv("ZXC_EVIDENCE_ENDPOINT")); value != "" {
+		cfg.Evidence.Endpoint = value
+	}
+	if value := strings.TrimSpace(os.Getenv("ZXC_EVIDENCE_SECRET_ID")); value != "" {
+		cfg.Evidence.SecretID = value
+	}
+	if value := strings.TrimSpace(os.Getenv("ZXC_EVIDENCE_SECRET_KEY")); value != "" {
+		cfg.Evidence.SecretKey = value
+	}
+	if value := strings.TrimSpace(os.Getenv("ZXC_EVIDENCE_PUBLIC_KEY")); value != "" {
+		cfg.Evidence.PublicKey = value
+	}
+	if value := os.Getenv("ZXC_EVIDENCE_PRIVATE_KEY"); value != "" {
+		cfg.Evidence.PrivateKey = value
+	}
+	if value := strings.TrimSpace(os.Getenv("ZXC_EVIDENCE_TIMEOUT")); value != "" {
+		if timeout, err := time.ParseDuration(value); err == nil {
+			cfg.Evidence.Timeout = timeout
+		}
+	}
+	cfg.Logistics.Endpoint = os.ExpandEnv(cfg.Logistics.Endpoint)
+	cfg.Logistics.SecretID = os.ExpandEnv(cfg.Logistics.SecretID)
+	cfg.Logistics.SecretKey = os.ExpandEnv(cfg.Logistics.SecretKey)
+	if value := strings.TrimSpace(os.Getenv("XINGYANSHU_LOGISTICS_SECRET_ID")); value != "" {
+		cfg.Logistics.SecretID = value
+	}
+	if value := strings.TrimSpace(os.Getenv("XINGYANSHU_LOGISTICS_SECRET_KEY")); value != "" {
+		cfg.Logistics.SecretKey = value
+	}
 }
 
 // DefaultFileConfig 提供 COS 存储与一期上传限制的默认值。
@@ -331,6 +432,12 @@ func (c Config) Validate() error {
 		if err := validateAvatarRegistrationH5URL(c.Avatar.RegistrationH5URL); err != nil {
 			return err
 		}
+		if !isAbsoluteHTTPURL(c.Activity.CheckinH5URL) {
+			return fmt.Errorf("activity.checkin_h5_url must be an absolute http or https URL in production")
+		}
+		if !c.AfterSale.ReturnAddress.Valid() {
+			return fmt.Errorf("after_sale.return_address is required in production")
+		}
 		if c.Avatar.RosterIdentityProvider == "" || c.Avatar.RosterIdentityProvider == "mock" {
 			return fmt.Errorf("avatar.roster_identity_provider must be a real provider in production")
 		}
@@ -387,13 +494,28 @@ func (c Config) Validate() error {
 			return fmt.Errorf("content_safety.timeout must be positive when configured")
 		}
 	}
-	if c.Evidence.Provider != "" && c.Evidence.Provider != "mock" {
-		return fmt.Errorf("evidence.provider is unsupported: %s", c.Evidence.Provider)
+	if c.Evidence.Provider != "" && c.Evidence.Provider != "mock" && c.Evidence.Provider != "zxchain" {
+		return fmt.Errorf("evidence.provider must be mock or zxchain when configured")
 	}
 	if c.Evidence.Provider == "mock" && (c.App.Environment != "test" || c.Evidence.CallbackSecret == "") {
 		return fmt.Errorf("evidence mock is only allowed in test with callback_secret")
 	}
+	if c.Evidence.Provider == "zxchain" && (!isAbsoluteHTTPURL(c.Evidence.Endpoint) || c.Evidence.SecretID == "" || c.Evidence.SecretKey == "" || c.Evidence.PublicKey == "" || c.Evidence.PrivateKey == "" || c.Evidence.Timeout <= 0) {
+		return fmt.Errorf("evidence endpoint, secret_id, secret_key, public_key, private_key and timeout are required for zxchain")
+	}
+	if c.Logistics.Provider != "" && c.Logistics.Provider != "tencent_cloudmarket_track" {
+		return fmt.Errorf("logistics.provider must be tencent_cloudmarket_track when configured")
+	}
+	if c.Logistics.Provider == "tencent_cloudmarket_track" {
+		if !isAbsoluteHTTPURL(c.Logistics.Endpoint) || c.Logistics.SecretID == "" || c.Logistics.SecretKey == "" || c.Logistics.Timeout <= 0 || c.Logistics.PollInterval <= 0 || c.Logistics.AutoConfirmAfter <= 0 {
+			return fmt.Errorf("logistics endpoint, secret_id, secret_key, timeout, poll_interval and auto_confirm_after are required when configured")
+		}
+	}
 	return nil
+}
+
+func (v ReturnAddressConfig) Valid() bool {
+	return strings.TrimSpace(v.RecipientName) != "" && strings.TrimSpace(v.Mobile) != "" && strings.TrimSpace(v.ProvinceCode) != "" && strings.TrimSpace(v.CityCode) != "" && strings.TrimSpace(v.DistrictCode) != "" && strings.TrimSpace(v.DetailAddress) != ""
 }
 
 func faceIdentityConfigured(value FaceIdentityConfig) bool {

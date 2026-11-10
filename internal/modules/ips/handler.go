@@ -369,15 +369,15 @@ func respond(c *gin.Context, status int, data map[string]any, code string, err e
 	case "IP_CREATION_PROCESS_VIDEO_FILE_NOT_FOUND":
 		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, code, "创作过程视频不存在或未上传完成", map[string]any{"resourceType": "FILE", "field": "creationProcessVideos[].fileId"}))
 	case "IP_CREATION_PROCESS_VIDEO_REQUIRED":
-		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusUnprocessableEntity, code, "原始创作的IP必须至少上传一段创作过程视频", map[string]any{"field": "creationProcessVideos", "maxCount": 3, "maxTotalSizeBytes": 104857600}))
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusUnprocessableEntity, code, "原始创作的IP必须至少上传一段创作过程视频", map[string]any{"field": "creationProcessVideos", "maxCount": 3, "maxTotalSizeBytes": 314572800}))
 	case "IP_CREATION_PROCESS_VIDEO_EXEMPTION_REQUIRED":
 		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusUnprocessableEntity, code, "未上传创作过程视频时，请填写无法提供原因", map[string]any{"field": "creationProcessVideoExemptionReason"}))
 	case "IP_CREATION_PROCESS_VIDEO_INVALID_TYPE":
 		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusUnprocessableEntity, code, "创作过程视频仅支持MP4格式", map[string]any{"field": "creationProcessVideos[].fileId", "allowedMimeType": "video/mp4"}))
 	case "IP_CREATION_PROCESS_VIDEO_TOO_LARGE":
-		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusUnprocessableEntity, code, "单个创作过程视频不得超过100MB", map[string]any{"field": "creationProcessVideos[].fileId", "maxSizeBytes": 104857600}))
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusUnprocessableEntity, code, "单个创作过程视频不得超过300MB", map[string]any{"field": "creationProcessVideos[].fileId", "maxSizeBytes": 314572800}))
 	case "IP_CREATION_PROCESS_VIDEO_TOTAL_SIZE_EXCEEDED":
-		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusUnprocessableEntity, code, "创作过程视频总大小不得超过100MB", map[string]any{"field": "creationProcessVideos", "maxTotalSizeBytes": 104857600}))
+		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusUnprocessableEntity, code, "创作过程视频总大小不得超过300MB", map[string]any{"field": "creationProcessVideos", "maxTotalSizeBytes": 314572800}))
 	case "IP_CREATION_PROCESS_VIDEO_COUNT_EXCEEDED":
 		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusUnprocessableEntity, code, "创作过程视频最多上传3段", map[string]any{"field": "creationProcessVideos", "maxCount": 3}))
 	case "IP_CREATION_PROCESS_VIDEO_LOCKED":

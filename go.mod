@@ -3,6 +3,7 @@ module xingyanshu-backend
 go 1.25.0
 
 require (
+	git.woa.com/zhixinlian/nft_wallet_sdk v0.0.0
 	github.com/gabriel-vasile/mimetype v1.4.12
 	github.com/gin-contrib/cors v1.7.6
 	github.com/gin-gonic/gin v1.12.0
@@ -11,14 +12,21 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/mojocn/base64Captcha v1.3.8
 	github.com/redis/go-redis/v9 v9.22.0
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.188
+	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/faceid v1.3.184
+	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/ims v1.3.188
 	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/tms v1.3.159
 	github.com/tencentyun/cos-go-sdk-v5 v0.7.75
+	github.com/xuri/excelize/v2 v2.11.0
+	github.com/yeka/zip v0.0.0-20231116150916-03d6312748a9
 	golang.org/x/crypto v0.53.0
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/mysql v1.6.0
 	gorm.io/gorm v1.31.2
 )
+
+replace git.woa.com/zhixinlian/nft_wallet_sdk => ./nft_wallet_sdk/nft_wallet_sdk
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
@@ -50,16 +58,11 @@ require (
 	github.com/quic-go/quic-go v0.59.0 // indirect
 	github.com/richardlehane/mscfb v1.0.7 // indirect
 	github.com/richardlehane/msoleps v1.0.6 // indirect
-	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e // indirect
-	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/faceid v1.3.184 // indirect
-	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/ims v1.3.188 // indirect
 	github.com/tiendc/go-deepcopy v1.7.2 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.3.1 // indirect
 	github.com/xuri/efp v0.0.1 // indirect
-	github.com/xuri/excelize/v2 v2.11.0 // indirect
 	github.com/xuri/nfp v0.0.2-0.20250530014748-2ddeb826f9a9 // indirect
-	github.com/yeka/zip v0.0.0-20231116150916-03d6312748a9 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.5.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/arch v0.22.0 // indirect

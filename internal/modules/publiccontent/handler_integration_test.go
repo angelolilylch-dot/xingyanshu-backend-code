@@ -52,11 +52,11 @@ func TestPublicH5HTTPWithMySQL(t *testing.T) {
 	mustPublic(t, db.Table("product").Create(map[string]any{"id": productID, "status": "PUBLISHED", "version": 1, "product_no": fmt.Sprintf("PUBLIC-P-%d", base), "creator_id": 1, "ip_id": 1, "authorization_id": 1, "work_id": 1, "current_version_id": productVersionID, "fulfillment_mode": "CREATOR_SHIP", "sale_region_mode": "NATIONWIDE"}).Error)
 	mustPublic(t, db.Table("product_version").Create(map[string]any{"id": productVersionID, "status": "PUBLISHED", "version": 1, "product_id": productID, "version_no": 1, "product_name": "公开商品", "product_type": "CULTURAL_PRODUCT", "cover_file_id": coverID, "detail_files_json": fmt.Sprintf("[%d]", detailID), "public_copyright_notice": "公开版权说明", "freight_mode": "FREE", "freight_amount": "0", "after_sale_template_id": 1, "rule_snapshot": "{}", "check_status": "PASS"}).Error)
 	mustPublic(t, db.Table("product_sku").Create(map[string]any{"id": skuID, "status": "ACTIVE", "version": 1, "product_version_id": productVersionID, "sku_code": fmt.Sprintf("SKU-%d", base), "sku_name": "默认规格", "sale_price": "12.00", "stock_total": 10, "sku_status": "ON_SALE"}).Error)
-	now := time.Now()
+	now := time.Now().Truncate(time.Second)
 	mustPublic(t, db.Table("activity").Create(map[string]any{"id": activityID, "status": "BOOKING_PAUSED", "version": 1, "activity_no": fmt.Sprintf("PUBLIC-A-%d", base), "creator_id": 1, "ip_id": 1, "authorization_id": 1, "actual_city_code": "350100", "current_version_id": activityVersionID}).Error)
 	mustPublic(t, db.Table("activity_version").Create(map[string]any{"id": activityVersionID, "status": "BOOKING_PAUSED", "version": 1, "activity_id": activityID, "version_no": 1, "activity_name": "公开暂停活动", "cover_file_id": coverID, "venue_name": "测试场馆", "map_point_name": "测试点", "longitude": "119.2", "latitude": "26.0", "public_copyright_notice": "公开版权说明", "refund_template_id": 1, "rule_snapshot": "{}", "check_status": "PASS"}).Error)
-	mustPublic(t, db.Table("activity_session").Create(map[string]any{"id": sessionID, "status": "ACTIVE", "version": 1, "activity_version_id": activityVersionID, "session_no": "S001", "start_at": now.Add(time.Hour), "end_at": now.Add(2 * time.Hour), "quota_total": 10}).Error)
-	mustPublic(t, db.Table("activity_ticket_type").Create(map[string]any{"id": ticketID, "status": "ACTIVE", "version": 1, "session_id": sessionID, "ticket_code": "ADULT", "ticket_name": "成人票", "charge_type": "FREE", "price": "0", "quota_total": 10}).Error)
+	mustPublic(t, db.Table("activity_session").Create(map[string]any{"id": sessionID, "status": "PUBLISHED", "version": 1, "activity_version_id": activityVersionID, "session_no": "S001", "start_at": now.Add(time.Hour), "end_at": now.Add(2 * time.Hour), "quota_total": 10}).Error)
+	mustPublic(t, db.Table("activity_ticket_type").Create(map[string]any{"id": ticketID, "status": "PUBLISHED", "version": 1, "session_id": sessionID, "ticket_code": "GENERAL", "ticket_name": "普通票", "charge_type": "FREE", "price": "0", "quota_total": 10}).Error)
 	defer func() {
 		db.Exec("DELETE FROM activity_ticket_type WHERE id=?", ticketID)
 		db.Exec("DELETE FROM activity_session WHERE id=?", sessionID)
@@ -78,6 +78,18 @@ func TestPublicH5HTTPWithMySQL(t *testing.T) {
 	w := servePublic(r, "/api/v1/public/activities")
 	if !bytes.Contains(w.Body.Bytes(), []byte("bookingPaused")) || !bytes.Contains(w.Body.Bytes(), []byte("true")) {
 		t.Fatalf("paused activity must stay visible: %s", w.Body.String())
+	}
+	w = servePublic(r, "/api/v1/public/activities/"+fmt.Sprint(activityID))
+	if w.Code != http.StatusOK || bytes.Contains(w.Body.Bytes(), []byte(`"tickets":null`)) || !bytes.Contains(w.Body.Bytes(), []byte(`"ticketName":"普通票"`)) {
+		t.Fatalf("public activity tickets=%s", w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"startAt":"`+formatPublicActivityTime(now.Add(time.Hour))+`"`)) || !bytes.Contains(w.Body.Bytes(), []byte(`"endAt":"`+formatPublicActivityTime(now.Add(2*time.Hour))+`"`)) {
+		t.Fatalf("public activity time format=%s", w.Body.String())
+	}
+	mustPublic(t, db.Table("activity_ticket_type").Where("id=?", ticketID).Delete(nil).Error)
+	w = servePublic(r, "/api/v1/public/activities/"+fmt.Sprint(activityID))
+	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte(`"tickets":[]`)) {
+		t.Fatalf("empty public activity tickets=%s", w.Body.String())
 	}
 	w = servePublic(r, "/api/v1/public/products/"+fmt.Sprint(productID))
 	if bytes.Contains(w.Body.Bytes(), []byte("ipId")) || !bytes.Contains(w.Body.Bytes(), []byte("/api/v1/public/media/"+fmt.Sprint(detailID))) {
@@ -103,5 +115,20 @@ func mustPublic(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPublicFieldNormalization(t *testing.T) {
+	if !sqlBool([]byte("1")) || sqlBool([]byte("0")) {
+		t.Fatal("SQL boolean should normalize to a Go bool")
+	}
+	for _, value := range []any{nil, "null", []byte("null"), `"null"`} {
+		if spec, ok := normalizedSpec(value).(map[string]any); !ok || len(spec) != 0 {
+			t.Fatalf("null spec %#v should become empty object, got %#v", value, spec)
+		}
+	}
+	spec := normalizedSpec(`{"color":"red"}`).(map[string]any)
+	if spec["color"] != "red" {
+		t.Fatalf("valid JSON spec lost: %#v", spec)
 	}
 }

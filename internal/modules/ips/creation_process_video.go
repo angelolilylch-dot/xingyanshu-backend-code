@@ -13,7 +13,7 @@ import (
 
 const (
 	creationProcessVideoMaxCount       = 3
-	creationProcessVideoMaxBytes int64 = 100 * 1024 * 1024
+	creationProcessVideoMaxBytes int64 = 300 * 1024 * 1024
 )
 
 // CreationProcessVideoInput 是 IP 入库的私有创作过程佐证视频；不属于后续授权素材包。

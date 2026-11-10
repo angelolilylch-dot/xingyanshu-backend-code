@@ -64,6 +64,69 @@ type ListInput struct {
 	PageSize int
 }
 
+// activityListRow is the compact, one-row-per-activity management summary.
+// It deliberately excludes session and ticket arrays; those remain on the detail API.
+type activityListRow struct {
+	ID                     uint64     `gorm:"column:id"`
+	ActivityNo             string     `gorm:"column:activity_no"`
+	Status                 string     `gorm:"column:status"`
+	ActualCityCode         string     `gorm:"column:actual_city_code"`
+	CurrentVersionID       *uint64    `gorm:"column:current_version_id"`
+	AuthorizationID        uint64     `gorm:"column:authorization_id"`
+	IPID                   uint64     `gorm:"column:ip_id"`
+	CreatedAt              time.Time  `gorm:"column:created_at"`
+	UpdatedAt              time.Time  `gorm:"column:updated_at"`
+	ActivityName           string     `gorm:"column:activity_name"`
+	VenueName              string     `gorm:"column:venue_name"`
+	CoverFileID            uint64     `gorm:"column:cover_file_id"`
+	CheckStatus            string     `gorm:"column:check_status"`
+	SessionCount           int64      `gorm:"column:session_count"`
+	EarliestStartAt        *time.Time `gorm:"column:earliest_start_at"`
+	LatestEndAt            *time.Time `gorm:"column:latest_end_at"`
+	QuotaTotal             int64      `gorm:"column:quota_total"`
+	BookedQuantity         int64      `gorm:"column:booked_quantity"`
+	SuccessfulBookingCount int64      `gorm:"column:successful_booking_count"`
+}
+
+func (r activityListRow) summary() map[string]any {
+	remainingQuota := r.QuotaTotal - r.BookedQuantity
+	if remainingQuota < 0 {
+		remainingQuota = 0
+	}
+	return map[string]any{
+		"id":                     fmt.Sprint(r.ID),
+		"activityNo":             r.ActivityNo,
+		"status":                 r.Status,
+		"actualCityCode":         r.ActualCityCode,
+		"currentVersionId":       uintString(r.CurrentVersionID),
+		"authorizationId":        fmt.Sprint(r.AuthorizationID),
+		"ipId":                   fmt.Sprint(r.IPID),
+		"createdAt":              r.CreatedAt,
+		"updatedAt":              r.UpdatedAt,
+		"activityName":           r.ActivityName,
+		"venueName":              r.VenueName,
+		"coverFileId":            fmt.Sprint(r.CoverFileID),
+		"checkStatus":            r.CheckStatus,
+		"sessionCount":           r.SessionCount,
+		"earliestStartAt":        r.EarliestStartAt,
+		"latestEndAt":            r.LatestEndAt,
+		"quotaTotal":             r.QuotaTotal,
+		"bookedQuantity":         r.BookedQuantity,
+		"remainingQuota":         remainingQuota,
+		"successfulBookingCount": r.SuccessfulBookingCount,
+		"canPauseBooking":        r.Status == "PUBLISHED",
+		"canResumeBooking":       r.Status == "BOOKING_PAUSED",
+		"canDelist":              r.Status == "PUBLISHED" && r.SuccessfulBookingCount == 0,
+	}
+}
+
+func uintString(v *uint64) string {
+	if v == nil || *v == 0 {
+		return ""
+	}
+	return fmt.Sprint(*v)
+}
+
 func (s *Service) Create(ctx context.Context, current creators.CurrentCreator, input Input) (map[string]any, string, error) {
 	if !valid(input) {
 		return nil, "VALIDATION_FORMAT_INVALID", nil
@@ -183,7 +246,14 @@ func (s *Service) List(ctx context.Context, creatorID uint64, input ListInput) (
 	if input.PageSize > 100 {
 		input.PageSize = 100
 	}
-	q := s.db.WithContext(ctx).Table("activity a").Select("a.id,a.activity_no,a.status,a.actual_city_code,a.current_version_id,a.created_at,v.activity_name,v.venue_name").Joins("LEFT JOIN activity_version v ON v.id=a.current_version_id").Where("a.creator_id=?", creatorID)
+	q := s.db.WithContext(ctx).Table("activity a").Select(`a.id,a.activity_no,a.status,a.actual_city_code,a.current_version_id,a.authorization_id,a.ip_id,a.created_at,a.updated_at,
+		v.activity_name,v.venue_name,v.cover_file_id,v.check_status,
+		(SELECT COUNT(*) FROM activity_session s WHERE s.activity_version_id=a.current_version_id) AS session_count,
+		(SELECT MIN(s.start_at) FROM activity_session s WHERE s.activity_version_id=a.current_version_id) AS earliest_start_at,
+		(SELECT MAX(s.end_at) FROM activity_session s WHERE s.activity_version_id=a.current_version_id) AS latest_end_at,
+		COALESCE((SELECT SUM(s.quota_total) FROM activity_session s WHERE s.activity_version_id=a.current_version_id),0) AS quota_total,
+		COALESCE((SELECT SUM(b.quantity) FROM activity_booking b WHERE b.activity_id=a.id AND b.status IN ('PENDING_VERIFICATION','VERIFIED')),0) AS booked_quantity,
+		(SELECT COUNT(*) FROM activity_booking b WHERE b.activity_id=a.id AND b.status IN ('PENDING_VERIFICATION','VERIFIED')) AS successful_booking_count`).Joins("LEFT JOIN activity_version v ON v.id=a.current_version_id").Where("a.creator_id=?", creatorID)
 	if input.IPID > 0 {
 		q = q.Where("a.ip_id=?", input.IPID)
 	}
@@ -200,9 +270,13 @@ func (s *Service) List(ctx context.Context, creatorID uint64, input ListInput) (
 	if e := q.Count(&total).Error; e != nil {
 		return nil, "", e
 	}
-	var rows []map[string]any
+	var rows []activityListRow
 	e := q.Order("a.id DESC").Offset((input.PageNo - 1) * input.PageSize).Limit(input.PageSize).Find(&rows).Error
-	return map[string]any{"items": rows, "pageNo": input.PageNo, "pageSize": input.PageSize, "total": total}, "", e
+	items := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, row.summary())
+	}
+	return map[string]any{"items": items, "pageNo": input.PageNo, "pageSize": input.PageSize, "total": total}, "", e
 }
 
 func (s *Service) Get(ctx context.Context, creatorID, activityID uint64) (map[string]any, string, error) {

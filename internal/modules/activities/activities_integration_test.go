@@ -51,7 +51,7 @@ func TestActivityLifecycleWithMySQL(t *testing.T) {
 	ensureTicketDict(t, db)
 	svc := NewService(db, contentmoderation.NewProvider(config.ContentSafetyConfig{Provider: "mock"}))
 	creator := creators.CurrentCreator{UserID: userID, CreatorID: creatorID}
-	in := Input{AuthorizationID: authID, ActivityName: "CNT03 文化研学", ActivityIntro: "研学活动", CoverFileID: fileID, VenueName: "测试场馆", MapPointName: "测试点位", Longitude: "119.2965", Latitude: "26.0745", ActualCityCode: city, Notice: "注意事项", PublicCopyrightNotice: "版权说明", RefundTemplateID: templateID, Sessions: []Session{{SessionNo: "S001", SessionName: "上午场", StartAt: now.Add(24 * time.Hour), EndAt: now.Add(26 * time.Hour), QuotaTotal: 100, Tickets: []Ticket{{TicketTypeCode: "ADULT", ChargeType: "PAID", Price: "88.00", QuotaTotal: 60}, {TicketTypeCode: "EARLY_BIRD", ChargeType: "FREE", Price: "0", QuotaTotal: 40}}}}}
+	in := Input{AuthorizationID: authID, ActivityName: "CNT03 文化研学", ActivityIntro: "研学活动", CoverFileID: fileID, VenueName: "测试场馆", MapPointName: "测试点位", Longitude: "119.2965", Latitude: "26.0745", ActualCityCode: city, Notice: "注意事项", PublicCopyrightNotice: "版权说明", RefundTemplateID: templateID, Sessions: []Session{{SessionNo: "S001", SessionName: "上午场", StartAt: now.Add(24 * time.Hour), EndAt: now.Add(26 * time.Hour), QuotaTotal: 100, Tickets: []Ticket{{TicketTypeCode: "GENERAL", ChargeType: "PAID", Price: "88.00", QuotaTotal: 60}, {TicketTypeCode: "FREE", ChargeType: "FREE", Price: "0", QuotaTotal: 40}}}}}
 	created, code, err := svc.Create(context.Background(), creator, in)
 	if err != nil || code != "" || created["status"] != "PUBLISHED" {
 		t.Fatalf("create=%#v code=%s err=%v", created, code, err)
@@ -62,6 +62,14 @@ func TestActivityLifecycleWithMySQL(t *testing.T) {
 	if err != nil || code != "" || listed["total"].(int64) != 1 {
 		t.Fatalf("list=%#v code=%s err=%v", listed, code, err)
 	}
+	listItems, ok := listed["items"].([]map[string]any)
+	if !ok || len(listItems) != 1 {
+		t.Fatalf("list items=%#v", listed["items"])
+	}
+	item := listItems[0]
+	if item["coverFileId"] != fmt.Sprint(fileID) || item["checkStatus"] != "PASS" || item["sessionCount"] != int64(1) || item["quotaTotal"] != int64(100) || item["bookedQuantity"] != int64(0) || item["remainingQuota"] != int64(100) || item["canPauseBooking"] != true || item["canDelist"] != true {
+		t.Fatalf("list summary=%#v", item)
+	}
 	if _, code, err = svc.ChangeBooking(context.Background(), creator, activityID, false); err != nil || code != "" {
 		t.Fatalf("pause code=%s err=%v", code, err)
 	}
@@ -69,6 +77,14 @@ func TestActivityLifecycleWithMySQL(t *testing.T) {
 		t.Fatalf("resume code=%s err=%v", code, err)
 	}
 	must(t, db.Table("activity_booking").Create(map[string]any{"id": idgen.Next(), "status": "PENDING_VERIFICATION", "version": 1, "booking_no": fmt.Sprintf("CNT03-BOOK-%d", activityID), "consumer_id": 1, "activity_id": activityID, "session_id": 1, "ticket_type_id": 1, "quantity": 1, "amount": "0.00", "rule_snapshot": "{}"}).Error)
+	listed, code, err = svc.List(context.Background(), creatorID, ListInput{IPID: ipID, PageNo: 1, PageSize: 20})
+	if err != nil || code != "" {
+		t.Fatalf("list with booking=%#v code=%s err=%v", listed, code, err)
+	}
+	item = listed["items"].([]map[string]any)[0]
+	if item["bookedQuantity"] != int64(1) || item["remainingQuota"] != int64(99) || item["successfulBookingCount"] != int64(1) || item["canDelist"] != false {
+		t.Fatalf("list booking summary=%#v", item)
+	}
 	if _, code, err = svc.Delist(context.Background(), creator, activityID); err != nil || code != "ACTIVITY_HAS_SUCCESSFUL_BOOKINGS" {
 		t.Fatalf("delist with booking code=%s err=%v", code, err)
 	}
@@ -86,7 +102,7 @@ func TestActivityLifecycleWithMySQL(t *testing.T) {
 
 func ensureTicketDict(t *testing.T, db *gorm.DB) {
 	t.Helper()
-	for i, item := range []struct{ Code, Name string }{{"ADULT", "成人票"}, {"EARLY_BIRD", "早鸟票"}} {
+	for i, item := range []struct{ Code, Name string }{{"GENERAL", "普通票"}, {"FREE", "免费票"}} {
 		var n int64
 		must(t, db.Table("sys_dict_item").Where("dict_type='ACTIVITY_TICKET_TYPE' AND dict_code=?", item.Code).Count(&n).Error)
 		if n == 0 {

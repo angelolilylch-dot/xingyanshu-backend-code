@@ -12,6 +12,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"xingyanshu-backend/internal/config"
 	"xingyanshu-backend/internal/platform/audit"
 	"xingyanshu-backend/internal/platform/idgen"
 )
@@ -19,6 +20,7 @@ import (
 const (
 	regionDictType        = "REGION"
 	adminConfigPermission = "ADMIN_CONFIG_MANAGE"
+	activityTicketType    = "ACTIVITY_TICKET_TYPE"
 )
 
 var (
@@ -102,6 +104,15 @@ type EnabledRequest struct {
 	Reason  string `json:"reason" binding:"required,max=500"`
 }
 
+// ActivityTicketTypeUpdateRequest lets a platform administrator control whether
+// a predefined ticket type can be selected and its display order. Codes are
+// intentionally immutable so historical activity tickets remain interpretable.
+type ActivityTicketTypeUpdateRequest struct {
+	Enabled bool   `json:"enabled"`
+	SortNo  int    `json:"sortNo" binding:"min=0,max=999999"`
+	Reason  string `json:"reason" binding:"required,max=500"`
+}
+
 // RegionCreateRequest 定义平台地区主数据维护入参；地区层级由标准六码编码推导。
 type RegionCreateRequest struct {
 	RegionCode string `json:"regionCode" binding:"required,len=6"`
@@ -147,8 +158,57 @@ func (s *Service) ListDictionary(ctx context.Context, dictType string, enabledOn
 	return map[string]any{"items": dictionaryResponses(items)}, "", nil
 }
 
+// ListActivityTicketTypes is the administrator view of the fixed activity
+// ticket dictionary and intentionally includes disabled items.
+func (s *Service) ListActivityTicketTypes(ctx context.Context) (map[string]any, error) {
+	items, err := s.listDictionaryItems(ctx, activityTicketType, false)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		result = append(result, activityTicketTypeResponse(item))
+	}
+	return map[string]any{"items": result}, nil
+}
+
+// UpdateActivityTicketType changes only the enabled flag and order. Existing
+// activities hold a ticket snapshot, so disabling a type affects new activity
+// editing only and never mutates historical tickets.
+func (s *Service) UpdateActivityTicketType(ctx context.Context, operator Operator, code string, version uint32, request ActivityTicketTypeUpdateRequest) (map[string]any, string, error) {
+	code = strings.ToUpper(strings.TrimSpace(code))
+	if code == "" {
+		return nil, "VALIDATION_FORMAT_INVALID", nil
+	}
+	var response map[string]any
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var before dictionaryItem
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("dict_type = ? AND dict_code = ?", activityTicketType, code).First(&before).Error; err != nil {
+			return err
+		}
+		if before.Version != version {
+			return errVersionConflict
+		}
+		status := "SUSPENDED"
+		if request.Enabled {
+			status = "ACTIVE"
+		}
+		updates := map[string]any{"enabled": request.Enabled, "sort_no": request.SortNo, "status": status, "status_reason": strings.TrimSpace(request.Reason), "version": before.Version + 1, "updated_by": operator.ID}
+		if err := tx.Model(&dictionaryItem{}).Where("id = ? AND version = ?", before.ID, version).Updates(updates).Error; err != nil {
+			return err
+		}
+		after := before
+		after.Enabled, after.SortNo, after.Status, after.Version = request.Enabled, request.SortNo, status, before.Version+1
+		response = activityTicketTypeResponse(after)
+		return audit.WriteLog(tx, "ACTIVITY_TICKET_TYPE_UPDATED", "ACTIVITY_TICKET_TYPE", before.ID, activityTicketTypeResponse(before), response, "SUCCESS", toAuditOperator(operator))
+	})
+	return foundationResult(response, err)
+}
+
 // ListRegions 对游客开放已启用地区，地区等级和父级通过标准行政区划编码推导。
 func (s *Service) ListRegions(ctx context.Context, keyword, level, parentCode string) (map[string]any, string, error) {
+	level = normalizeRegionLevel(level)
+	parentCode = strings.TrimSpace(parentCode)
 	query := s.db.WithContext(ctx).Where("dict_type = ? AND enabled = ? AND status = ?", regionDictType, true, "ACTIVE")
 	if keyword = strings.TrimSpace(keyword); keyword != "" {
 		query = query.Where("dict_code LIKE ? OR dict_name LIKE ?", "%"+keyword+"%", "%"+keyword+"%")
@@ -169,6 +229,27 @@ func (s *Service) ListRegions(ctx context.Context, keyword, level, parentCode st
 		result = append(result, map[string]any{"code": item.DictCode, "name": item.DictName, "level": regionLevel, "parentCode": parent})
 	}
 	return map[string]any{"items": result}, "", nil
+}
+
+// normalizeRegionLevel keeps the public endpoint tolerant of numeric H5 values
+// while exposing the documented NATION/PROVINCE/CITY/DISTRICT contract. Empty
+// means no level filter. Numeric values follow the normal address-picker order:
+// 0=NATION, 1=PROVINCE, 2=CITY, 3=DISTRICT.
+func normalizeRegionLevel(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "", "ALL":
+		return ""
+	case "NATION", "COUNTRY", "0":
+		return "NATION"
+	case "PROVINCE", "1":
+		return "PROVINCE"
+	case "CITY", "2":
+		return "CITY"
+	case "DISTRICT", "COUNTY", "3", "4":
+		return "DISTRICT"
+	default:
+		return strings.ToUpper(strings.TrimSpace(value))
+	}
 }
 
 // ListRegionsForAdmin 返回全部地区主数据，供平台管理员维护时查看停用项。
@@ -325,6 +406,10 @@ func (s *Service) UpdateConfig(ctx context.Context, operator Operator, configKey
 	if !allowedConfigKey(configKey) || strings.TrimSpace(request.Value) == "" {
 		return nil, "VALIDATION_FORMAT_INVALID", nil
 	}
+	value, code := normalizeConfigValue(configKey, request.Value)
+	if code != "" {
+		return nil, code, nil
+	}
 	var response map[string]any
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var before systemConfig
@@ -337,15 +422,33 @@ func (s *Service) UpdateConfig(ctx context.Context, operator Operator, configKey
 			}
 			return errVersionConflict
 		}
-		if err := tx.Model(&systemConfig{}).Where("id = ? AND version = ?", before.ID, version).Updates(map[string]any{"config_value": strings.TrimSpace(request.Value), "version": before.Version + 1, "updated_by": operator.ID}).Error; err != nil {
+		if err := tx.Model(&systemConfig{}).Where("id = ? AND version = ?", before.ID, version).Updates(map[string]any{"config_value": value, "version": before.Version + 1, "updated_by": operator.ID}).Error; err != nil {
 			return err
 		}
 		after := before
-		after.ConfigValue, after.Version = strings.TrimSpace(request.Value), before.Version+1
+		after.ConfigValue, after.Version = value, before.Version+1
 		response = configResponse(after)
 		return audit.WriteLog(tx, "CONFIG_UPDATED", "SYS_CONFIG", before.ID, configResponse(before), response, "SUCCESS", toAuditOperator(operator))
 	})
 	return foundationResult(response, err)
+}
+
+// normalizeConfigValue keeps PLATFORM_RETURN_ADDRESS structured and canonical.
+// Other configuration keys preserve their existing string-based contract.
+func normalizeConfigValue(configKey, raw string) (string, string) {
+	value := strings.TrimSpace(raw)
+	if configKey != "PLATFORM_RETURN_ADDRESS" {
+		return value, ""
+	}
+	var address config.ReturnAddressConfig
+	if err := json.Unmarshal([]byte(value), &address); err != nil || !address.Valid() {
+		return "", "VALIDATION_FORMAT_INVALID"
+	}
+	canonical, err := json.Marshal(address)
+	if err != nil {
+		return "", "VALIDATION_FORMAT_INVALID"
+	}
+	return string(canonical), ""
 }
 
 // ListTemplates 查询固定售后模板的所有版本，供平台维护页面使用。
@@ -483,6 +586,9 @@ func dictionaryResponses(items []dictionaryItem) []map[string]any {
 		result = append(result, map[string]any{"code": item.DictCode, "name": item.DictName, "sortNo": item.SortNo, "enabled": item.Enabled})
 	}
 	return result
+}
+func activityTicketTypeResponse(item dictionaryItem) map[string]any {
+	return map[string]any{"id": fmt.Sprint(item.ID), "code": item.DictCode, "name": item.DictName, "sortNo": item.SortNo, "enabled": item.Enabled, "status": item.Status, "version": item.Version, "updatedAt": item.UpdatedAt}
 }
 func tagDictType(tagType string) string { return "TAG_" + strings.ToUpper(tagType) }
 func tagResponse(item dictionaryItem) map[string]any {

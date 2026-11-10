@@ -90,6 +90,14 @@ func TestProductOrdersHTTPWithMySQL(t *testing.T) {
 		t.Fatalf("create: %+v", created)
 	}
 	orderID := fmt.Sprint(created.Data["productOrderId"])
+	missingKey := call(t, r, http.MethodPost, "/api/v1/consumer/product-orders", body, token, "")
+	if missingKey.Code != http.StatusBadRequest || !bytes.Contains([]byte(missingKey.Body), []byte("Idempotency-Key")) {
+		t.Fatalf("order create without idempotency key: %+v", missingKey)
+	}
+	orders := call(t, r, http.MethodGet, "/api/v1/consumer/product-orders?status=PENDING_PAYMENT", nil, token, "")
+	if orders.Code != http.StatusOK || orders.Data["items"] == nil || fmt.Sprint(orders.Data["total"]) != "1" {
+		t.Fatalf("filtered order list envelope: %+v", orders)
+	}
 	replayed := call(t, r, http.MethodPost, "/api/v1/consumer/product-orders", body, token, "order-create-00001")
 	if replayed.Code != 201 || replayed.Header.Get("Idempotency-Replayed") != "true" {
 		t.Fatalf("create replay: %+v", replayed)
@@ -106,6 +114,10 @@ func TestProductOrdersHTTPWithMySQL(t *testing.T) {
 	paid := call(t, r, http.MethodPost, "/api/v1/consumer/product-orders/"+orderID+"/mock-pay", map[string]any{"outcome": "SUCCESS"}, token, "payment-success-01")
 	if paid.Code != 200 || fmt.Sprint(paid.Data["status"]) != "PENDING_SHIPMENT" {
 		t.Fatalf("success pay: %+v", paid)
+	}
+	orders = call(t, r, http.MethodGet, "/api/v1/consumer/product-orders?status=PENDING_PAYMENT", nil, token, "")
+	if orders.Code != http.StatusOK || fmt.Sprint(orders.Data["total"]) != "0" {
+		t.Fatalf("order status filter not applied: %+v", orders)
 	}
 	detail := call(t, r, http.MethodGet, "/api/v1/consumer/product-orders/"+orderID, nil, token, "")
 	if detail.Code != 200 || detail.Data["address"] == nil {

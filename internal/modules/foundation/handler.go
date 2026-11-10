@@ -1,14 +1,19 @@
 package foundation
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
+	"xingyanshu-backend/internal/modules/creators"
 	"xingyanshu-backend/internal/modules/identity"
 	"xingyanshu-backend/internal/platform/httpx"
+	"xingyanshu-backend/internal/platform/idempotency"
 )
 
 // RegisterPublicRoutes 注册无需登录的只读主数据接口。固定白名单字典只包含前端展示所需枚举，
@@ -21,6 +26,22 @@ func RegisterPublicRoutes(group *gin.RouterGroup, service *Service) {
 	group.GET("/dictionaries/:dictType", func(c *gin.Context) {
 		enabledOnly := c.DefaultQuery("enabledOnly", "true") != "false"
 		data, code, err := service.ListDictionary(c.Request.Context(), c.Param("dictType"), enabledOnly)
+		writeResponse(c, http.StatusOK, data, code, err)
+	})
+}
+
+// RegisterCreatorRoutes exposes only enabled template versions for creator
+// product/activity forms. Template maintenance remains administrator-only.
+func RegisterCreatorRoutes(group *gin.RouterGroup, service *Service, middleware gin.HandlerFunc) {
+	creator := group.Group("/creator", middleware)
+	creator.GET("/after-sale-templates", func(c *gin.Context) {
+		// Read the authenticated principal so a route cannot accidentally become
+		// public when its middleware is changed by a caller.
+		if _, ok := creators.CurrentCreatorFromContext(c); !ok {
+			httpx.AbortWithError(c, httpx.NewError(http.StatusUnauthorized, "AUTH_UNAUTHORIZED", "登录状态已失效"))
+			return
+		}
+		data, code, err := service.ListTemplates(c.Request.Context(), c.Query("bizType"), true)
 		writeResponse(c, http.StatusOK, data, code, err)
 	})
 }
@@ -98,6 +119,51 @@ func RegisterProtectedRoutes(group *gin.RouterGroup, service *Service, middlewar
 		}
 		httpx.Success(c, http.StatusOK, data)
 	})
+	activityTicketAdmin := protected.Group("", identity.RequireAnyPermission("ACTIVITY_TICKET_TYPE_MANAGE"))
+	activityTicketAdmin.GET("/admin/activity-ticket-types", func(c *gin.Context) {
+		data, err := service.ListActivityTicketTypes(c.Request.Context())
+		if err != nil {
+			writeResponse(c, http.StatusOK, nil, "INTERNAL_ERROR", err)
+			return
+		}
+		httpx.Success(c, http.StatusOK, data)
+	})
+	activityTicketAdmin.PATCH("/admin/activity-ticket-types/:ticketTypeCode", func(c *gin.Context) {
+		version, ok := httpx.MustParseIfMatchVersion(c)
+		if !ok {
+			return
+		}
+		raw, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			httpx.AbortWithError(c, httpx.NewValidationError("VALIDATION_FORMAT_INVALID", "请求体读取失败"))
+			return
+		}
+		c.Request.Body = io.NopCloser(bytes.NewReader(raw))
+		var request ActivityTicketTypeUpdateRequest
+		if !httpx.BindJSON(c, &request) {
+			return
+		}
+		current, _ := identity.CurrentAdminFromContext(c)
+		result, replayed, err := idempotency.Execute(c.Request.Context(), service.db, idempotency.Scope{SubjectType: "ADMIN", SubjectID: current.UserID, Method: c.Request.Method, Path: c.FullPath()}, c.GetHeader("Idempotency-Key"), raw, func(_ *gorm.DB) (idempotency.Result, error) {
+			data, code, callErr := service.UpdateActivityTicketType(c.Request.Context(), operator(current, c.ClientIP()), c.Param("ticketTypeCode"), version, request)
+			if callErr != nil {
+				return idempotency.Result{}, callErr
+			}
+			return idempotency.Result{HTTPStatus: activityTicketTypeStatus(code), Code: code, Data: data}, nil
+		})
+		if err != nil {
+			httpx.AbortWithError(c, httpx.AppErrorFromIdempotency(err))
+			return
+		}
+		if replayed {
+			c.Header("Idempotency-Replayed", "true")
+		}
+		if result.Code == "OK" {
+			result.Code = ""
+		}
+		data, _ := result.Data.(map[string]any)
+		writeResponse(c, result.HTTPStatus, data, result.Code, nil)
+	})
 	admin.PATCH("/admin/configs/:configKey", func(c *gin.Context) {
 		version, ok := httpx.MustParseIfMatchVersion(c)
 		if !ok {
@@ -152,6 +218,19 @@ func RegisterProtectedRoutes(group *gin.RouterGroup, service *Service, middlewar
 	})
 }
 
+func activityTicketTypeStatus(code string) int {
+	switch code {
+	case "RESOURCE_NOT_FOUND":
+		return http.StatusNotFound
+	case "VERSION_CONFLICT":
+		return http.StatusConflict
+	case "VALIDATION_FORMAT_INVALID":
+		return http.StatusBadRequest
+	default:
+		return http.StatusOK
+	}
+}
+
 func operator(current identity.CurrentAdmin, clientIP string) Operator {
 	role := ""
 	if len(current.RoleCodes) > 0 {
@@ -187,6 +266,8 @@ func writeResponse(c *gin.Context, successStatus int, data map[string]any, code 
 			resource, field, message = "SYSTEM_CONFIG", "configKey", "平台配置不存在"
 		} else if strings.Contains(path, "after-sale-templates") {
 			resource, field, message = "AFTER_SALE_TEMPLATE", "templateId", "售后模板不存在"
+		} else if strings.Contains(path, "activity-ticket-types") {
+			resource, field, message = "ACTIVITY_TICKET_TYPE", "ticketTypeCode", "活动票种不存在"
 		}
 		httpx.AbortWithError(c, httpx.NewErrorWithData(http.StatusNotFound, resource+"_NOT_FOUND", message, map[string]any{"resourceType": resource, "field": field}))
 	case "RESOURCE_CONFLICT", "VERSION_CONFLICT":

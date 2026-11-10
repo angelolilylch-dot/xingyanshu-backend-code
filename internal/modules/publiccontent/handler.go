@@ -57,6 +57,9 @@ func (s *Service) products(c *gin.Context) {
 		return
 	}
 	addMedia(rows, "coverFileId")
+	for _, row := range rows {
+		row["purchasable"] = sqlBool(row["purchasable"])
+	}
 	httpx.Success(c, http.StatusOK, pageData(rows, p, n, total))
 }
 
@@ -100,8 +103,44 @@ func (s *Service) product(c *gin.Context) {
 		return
 	}
 	addMedia(skus, "skuFileId")
+	for _, sku := range skus {
+		sku["purchasable"] = sqlBool(sku["purchasable"])
+		sku["spec"] = normalizedSpec(sku["spec"])
+	}
 	row["skus"] = skus
 	httpx.Success(c, http.StatusOK, row)
+}
+
+func sqlBool(value any) bool {
+	switch v := value.(type) {
+	case bool:
+		return v
+	case int64:
+		return v != 0
+	case int:
+		return v != 0
+	case []byte:
+		return string(v) == "1" || strings.EqualFold(string(v), "true")
+	case string:
+		return v == "1" || strings.EqualFold(v, "true")
+	default:
+		return false
+	}
+}
+
+// normalizedSpec prevents a JSON column containing the literal string "null"
+// from leaking to callers as the string "null". The public contract is always
+// a JSON object (an empty object when the SKU has no specification attributes).
+func normalizedSpec(value any) any {
+	raw := strings.TrimSpace(fmt.Sprint(value))
+	if raw == "" || raw == "<nil>" || raw == "null" || raw == `"null"` {
+		return map[string]any{}
+	}
+	var object map[string]any
+	if json.Unmarshal([]byte(raw), &object) == nil && object != nil {
+		return object
+	}
+	return map[string]any{}
 }
 
 func (s *Service) activities(c *gin.Context) {
@@ -176,8 +215,10 @@ func (s *Service) activity(c *gin.Context) {
 		return
 	}
 	for _, session := range sessions {
-		var tickets []map[string]any
-		if err := s.db.WithContext(c).Table("activity_ticket_type").Where("session_id=? AND status='ACTIVE'", session["sessionId"]).Select("CAST(id AS CHAR) AS ticketTypeId,ticket_code AS ticketTypeCode,ticket_name AS ticketName,charge_type AS chargeType,price,quota_total AS quotaTotal,(quota_total>quota_locked+quota_used) AS bookable").Find(&tickets).Error; err != nil {
+		session["startAt"] = formatPublicActivityTime(session["startAt"])
+		session["endAt"] = formatPublicActivityTime(session["endAt"])
+		tickets := make([]map[string]any, 0)
+		if err := s.db.WithContext(c).Table("activity_ticket_type").Where("session_id=? AND status IN ?", session["sessionId"], []string{"PUBLISHED", "ACTIVE"}).Select("CAST(id AS CHAR) AS ticketTypeId,ticket_code AS ticketTypeCode,ticket_name AS ticketName,charge_type AS chargeType,price,quota_total AS quotaTotal,(quota_total>quota_locked+quota_used) AS bookable").Find(&tickets).Error; err != nil {
 			fail(c, err)
 			return
 		}
@@ -185,6 +226,26 @@ func (s *Service) activity(c *gin.Context) {
 	}
 	row["sessions"] = sessions
 	httpx.Success(c, http.StatusOK, row)
+}
+
+var publicActivityTimeZone = time.FixedZone("UTC+8", 8*60*60)
+
+// formatPublicActivityTime is intentionally a display-ready China Standard Time
+// value so consumer H5 clients do not need to make their own timezone conversion.
+func formatPublicActivityTime(value any) string {
+	var instant time.Time
+	switch v := value.(type) {
+	case time.Time:
+		instant = v
+	case *time.Time:
+		if v == nil {
+			return ""
+		}
+		instant = *v
+	default:
+		return ""
+	}
+	return instant.In(publicActivityTimeZone).Format("2006-01-02 15:04:05")
 }
 
 func (s *Service) home(c *gin.Context) {

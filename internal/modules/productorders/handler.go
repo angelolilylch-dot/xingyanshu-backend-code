@@ -62,7 +62,10 @@ func RegisterRoutes(g *gin.RouterGroup, s *Service, auth gin.HandlerFunc, enviro
 			write(c, s, raw, http.StatusCreated, func() (any, string, error) { return s.Create(c, curr(c), in, c.ClientIP()) })
 		}
 	})
-	r.GET("/product-orders", func(c *gin.Context) { d, e := s.List(c, curr(c)); respond(c, http.StatusOK, d, "", e) })
+	r.GET("/product-orders", func(c *gin.Context) {
+		d, e := s.List(c, curr(c), c.Query("status"))
+		respond(c, http.StatusOK, d, "", e)
+	})
 	r.GET("/product-orders/:productOrderId", func(c *gin.Context) {
 		oid, ok := id(c, "productOrderId")
 		if ok {

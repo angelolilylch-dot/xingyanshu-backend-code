@@ -73,6 +73,12 @@ func (failingEvidenceProvider) Submit(context.Context, evidence.SubmitRequest) (
 func (failingEvidenceProvider) Query(context.Context, string) (evidence.SubmitResult, error) {
 	return evidence.SubmitResult{}, fmt.Errorf("simulated evidence outage")
 }
+func (failingEvidenceProvider) RequestCertificate(context.Context, string) (evidence.CertificateResult, error) {
+	return evidence.CertificateResult{}, fmt.Errorf("simulated evidence outage")
+}
+func (failingEvidenceProvider) QueryCertificate(context.Context, string) (evidence.CertificateResult, error) {
+	return evidence.CertificateResult{}, fmt.Errorf("simulated evidence outage")
+}
 
 type failingContractStorage struct{}
 

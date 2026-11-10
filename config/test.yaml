@@ -48,6 +48,30 @@ evidence:
   provider: mock
   callback_secret: xingyanshu_test_evidence_callback_secret
 
+# 商品履约物流仅由后端 Worker 调用；密钥只从本机环境变量读取。
+logistics:
+  provider: tencent_cloudmarket_track
+  endpoint: https://ap-guangzhou.cloudmarket-apigw.com/service-d2zdkymg/express/query
+  secret_id: ${XINGYANSHU_LOGISTICS_SECRET_ID}
+  secret_key: ${XINGYANSHU_LOGISTICS_SECRET_KEY}
+  timeout: 10s
+  poll_interval: 10m
+  auto_confirm_after: 168h
+
+# 平台统一履约的退货地址；创建售后单时写入私有快照，不能被后续配置修改影响。
+after_sale:
+  return_address:
+    recipient_name: "星衍树售后中心"
+    mobile: "400-800-1234"
+    province_code: "440000"
+    city_code: "440100"
+    district_code: "440106"
+    detail_address: "测试退货收件地址"
+
+# 活动现场固定二维码扫码后跳转的消费者 H5 页面；二维码本身不含消费者身份信息。
+activity:
+  checkin_h5_url: "https://h5.test.xingyanshu.example/activity-checkin"
+
 avatar:
   # 扫码建档 H5 统一展示的固定客服号码；不按城市维护联系人。
   fallback_support_phone: "400-800-1234"

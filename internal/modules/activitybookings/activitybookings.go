@@ -15,6 +15,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"xingyanshu-backend/internal/config"
 	"xingyanshu-backend/internal/modules/identity"
 	"xingyanshu-backend/internal/platform/audit"
 	"xingyanshu-backend/internal/platform/idgen"
@@ -30,9 +31,18 @@ const (
 	reservationReleased       = "RELEASED"
 )
 
-type Service struct{ db *gorm.DB }
+type Service struct {
+	db       *gorm.DB
+	activity config.ActivityConfig
+}
 
 func NewService(db *gorm.DB) *Service { return &Service{db: db} }
+
+// NewServiceWithConfig is used by the running application. The zero-value
+// constructor remains for focused booking tests that do not create QR codes.
+func NewServiceWithConfig(db *gorm.DB, activity config.ActivityConfig) *Service {
+	return &Service{db: db, activity: activity}
+}
 
 type Input struct {
 	ActivityID   string `json:"activityId" binding:"required"`
@@ -421,16 +431,23 @@ func (s *Service) Get(ctx context.Context, current identity.CurrentConsumer, id 
 	}
 	return data(b), "", nil
 }
-func (s *Service) List(ctx context.Context, current identity.CurrentConsumer) ([]map[string]any, error) {
+
+// List returns a stable object envelope and lets the H5 filter its booking tabs
+// server-side instead of downloading every status.
+func (s *Service) List(ctx context.Context, current identity.CurrentConsumer, status string) (map[string]any, error) {
 	var rows []bookingRow
-	if e := s.db.WithContext(ctx).Table("activity_booking").Where("consumer_id=?", current.ConsumerID).Order("created_at DESC").Find(&rows).Error; e != nil {
+	query := s.db.WithContext(ctx).Table("activity_booking").Where("consumer_id=?", current.ConsumerID)
+	if status = strings.ToUpper(strings.TrimSpace(status)); status != "" {
+		query = query.Where("status=?", status)
+	}
+	if e := query.Order("created_at DESC").Find(&rows).Error; e != nil {
 		return nil, e
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, b := range rows {
 		out = append(out, data(b))
 	}
-	return out, nil
+	return map[string]any{"items": out, "total": len(out)}, nil
 }
 func (s *Service) VerificationCode(ctx context.Context, current identity.CurrentConsumer, id uint64) (map[string]any, string, error) {
 	var b bookingRow

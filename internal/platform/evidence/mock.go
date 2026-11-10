@@ -15,3 +15,11 @@ func (MockProvider) Submit(_ context.Context, request SubmitRequest) (SubmitResu
 func (MockProvider) Query(_ context.Context, requestNo string) (SubmitResult, error) {
 	return SubmitResult{Provider: "MOCK_EVIDENCE", RequestNo: requestNo, Status: "PENDING_CHAIN"}, nil
 }
+
+func (MockProvider) RequestCertificate(_ context.Context, receiptNo string) (CertificateResult, error) {
+	return CertificateResult{Provider: "MOCK_EVIDENCE", Status: "READY", ProviderStatus: "READY", CertURL: "https://mock.evidence.local/cert/" + receiptNo}, nil
+}
+
+func (MockProvider) QueryCertificate(_ context.Context, receiptNo string) (CertificateResult, error) {
+	return MockProvider{}.RequestCertificate(context.Background(), receiptNo)
+}

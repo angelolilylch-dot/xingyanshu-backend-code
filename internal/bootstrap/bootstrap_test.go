@@ -41,6 +41,33 @@ func TestPlatformAdminMenuDefinitionsIncludeB04AndB05(t *testing.T) {
 	}
 }
 
+func TestActivityTicketTypeSeedDefinitions(t *testing.T) {
+	want := map[string]string{"GENERAL": "普通票", "VIP": "VIP票", "STUDENT": "学生票", "FREE": "免费票"}
+	got := map[string]string{}
+	for _, item := range fixedDictionaries {
+		if item.Type == "ACTIVITY_TICKET_TYPE" {
+			got[item.Code] = item.Name
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("activity ticket type seed count=%d, want %d: %#v", len(got), len(want), got)
+	}
+	for code, name := range want {
+		if got[code] != name {
+			t.Fatalf("ticket type %s=%q, want %q", code, got[code], name)
+		}
+	}
+	for _, item := range permissions {
+		if item.Code == "MENU_PLATFORM_ACTIVITY_TICKETS" {
+			if item.PermissionType != "MENU" || item.ResourceCode != "A10" {
+				t.Fatalf("ticket menu = type %s resource %s, want MENU A10", item.PermissionType, item.ResourceCode)
+			}
+			return
+		}
+	}
+	t.Fatal("missing activity ticket type menu")
+}
+
 func TestCopyrightComplianceMenuDefinitionsIncludeAuthPlanReview(t *testing.T) {
 	for _, item := range permissions {
 		if item.Code == "MENU_AUTH_PLAN_REVIEW" {

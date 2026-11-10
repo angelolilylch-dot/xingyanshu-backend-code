@@ -18,6 +18,7 @@ import (
 	"xingyanshu-backend/internal/config"
 	"xingyanshu-backend/internal/database"
 	"xingyanshu-backend/internal/modules/activitybookings"
+	"xingyanshu-backend/internal/modules/creators"
 	"xingyanshu-backend/internal/modules/identity"
 	"xingyanshu-backend/internal/platform/idgen"
 )
@@ -39,7 +40,9 @@ func TestActivityBookingsHTTPWithMySQL(t *testing.T) {
 	base := idgen.Next()
 	consumer, other, sid, activity, version, session, paid, free := base+1, base+2, base+3, base+10, base+11, base+12, base+13, base+14
 	t.Cleanup(func() {
+		db.Exec("DELETE FROM verification_record WHERE booking_id IN (SELECT id FROM activity_booking WHERE activity_id=?)", activity)
 		db.Exec("DELETE FROM verification_code WHERE booking_id IN (SELECT id FROM activity_booking WHERE activity_id=?)", activity)
+		db.Exec("DELETE FROM activity_checkin_qrcode WHERE activity_id=?", activity)
 		db.Exec("DELETE FROM payment_transaction WHERE biz_type='ACTIVITY_BOOKING' AND biz_order_id IN (SELECT id FROM activity_booking WHERE activity_id=?)", activity)
 		db.Exec("DELETE FROM activity_quota_reservation WHERE booking_id IN (SELECT id FROM activity_booking WHERE activity_id=?)", activity)
 		db.Exec("DELETE FROM activity_booking WHERE activity_id=?", activity)
@@ -55,7 +58,13 @@ func TestActivityBookingsHTTPWithMySQL(t *testing.T) {
 	must(t, db.Table("auth_session").Create(map[string]any{"id": sid, "subject_type": "CONSUMER", "subject_id": consumer, "client_type": "CONSUMER_H5", "refresh_token_hash": "test", "token_version": 1, "status": "ACTIVE", "expires_at": time.Now().Add(time.Hour)}).Error)
 	seed(t, db, activity, version, session, paid, free)
 	r := gin.New()
-	activitybookings.RegisterRoutes(r.Group("/api/v1"), activitybookings.NewService(db), identity.RequireConsumerAuthentication(db, cfg.Auth), "test")
+	svc := activitybookings.NewServiceWithConfig(db, config.ActivityConfig{CheckinH5URL: "https://h5.example.test/activity-checkin"})
+	activitybookings.RegisterRoutes(r.Group("/api/v1"), svc, identity.RequireConsumerAuthentication(db, cfg.Auth), "test")
+	activitybookings.RegisterPublicRoutes(r.Group("/api/v1"), svc)
+	activitybookings.RegisterCreatorRoutes(r.Group("/api/v1"), svc, func(c *gin.Context) {
+		c.Set("creators.current", creators.CurrentCreator{CreatorID: activity, UserID: consumer})
+		c.Next()
+	})
 	token := consumerToken(t, cfg.Auth.JWTSecret, consumer, sid)
 	freeBody := map[string]any{"activityId": fmt.Sprint(activity), "sessionId": fmt.Sprint(session), "ticketTypeId": fmt.Sprint(free), "quantity": 2}
 	preview := call(t, r, http.MethodPost, "/api/v1/consumer/activity-bookings/preview", freeBody, token, "")
@@ -67,6 +76,14 @@ func TestActivityBookingsHTTPWithMySQL(t *testing.T) {
 		t.Fatalf("free create=%+v", freeCreated)
 	}
 	freeID := fmt.Sprint(freeCreated.Data["activityBookingId"])
+	missingKey := call(t, r, http.MethodPost, "/api/v1/consumer/activity-bookings", freeBody, token, "")
+	if missingKey.Code != http.StatusBadRequest || !bytes.Contains([]byte(missingKey.Body), []byte("Idempotency-Key")) {
+		t.Fatalf("booking create without idempotency key: %+v", missingKey)
+	}
+	bookings := call(t, r, http.MethodGet, "/api/v1/consumer/activity-bookings?status=PENDING_VERIFICATION", nil, token, "")
+	if bookings.Code != http.StatusOK || bookings.Data["items"] == nil || fmt.Sprint(bookings.Data["total"]) != "1" {
+		t.Fatalf("filtered booking list envelope: %+v", bookings)
+	}
 	replay := call(t, r, http.MethodPost, "/api/v1/consumer/activity-bookings", freeBody, token, "free-create-00001")
 	if replay.Code != 201 || replay.Header.Get("Idempotency-Replayed") != "true" {
 		t.Fatalf("replay=%+v", replay)
@@ -74,6 +91,48 @@ func TestActivityBookingsHTTPWithMySQL(t *testing.T) {
 	code := call(t, r, http.MethodGet, "/api/v1/consumer/activity-bookings/"+freeID+"/verification-code", nil, token, "")
 	if code.Code != 200 || fmt.Sprint(code.Data["displayCode"]) == "" {
 		t.Fatalf("code=%+v", code)
+	}
+	qr, qrCode, e := svc.CreateOrGetActivityQRCode(t.Context(), creators.CurrentCreator{CreatorID: activity, UserID: consumer}, activity)
+	must(t, e)
+	if qrCode != "" || qr["checkinURL"] == "" || qr["entryCode"] == "" {
+		t.Fatalf("activity checkin QR=%+v code=%s", qr, qrCode)
+	}
+	entryCode := fmt.Sprint(qr["entryCode"])
+	creatorQR := call(t, r, http.MethodPost, "/api/v1/creator/activities/"+fmt.Sprint(activity)+"/checkin-qrcode", nil, "", "creator-checkin-code-1")
+	if creatorQR.Code != http.StatusCreated || fmt.Sprint(creatorQR.Data["entryCode"]) != entryCode {
+		t.Fatalf("creator checkin QR=%+v", creatorQR)
+	}
+	creatorReplay := call(t, r, http.MethodPost, "/api/v1/creator/activities/"+fmt.Sprint(activity)+"/checkin-qrcode", nil, "", "creator-checkin-code-1")
+	if creatorReplay.Code != http.StatusCreated || creatorReplay.Header.Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("creator checkin QR replay=%+v", creatorReplay)
+	}
+	publicQR := call(t, r, http.MethodGet, "/api/v1/public/activity-checkin-qrcodes/"+entryCode, nil, "", "")
+	if publicQR.Code != http.StatusOK || fmt.Sprint(publicQR.Data["activityId"]) != fmt.Sprint(activity) {
+		t.Fatalf("public checkin QR=%+v", publicQR)
+	}
+	previewCheckin := call(t, r, http.MethodGet, "/api/v1/consumer/activity-check-ins/"+entryCode+"/preview", nil, token, "")
+	if previewCheckin.Code != http.StatusOK || previewCheckin.Data["eligibleBookings"] == nil {
+		t.Fatalf("checkin preview=%+v", previewCheckin)
+	}
+	confirmBody := map[string]any{"activityBookingId": freeID, "location": map[string]any{"longitude": 113.264385, "latitude": 23.129112, "accuracy": 20}}
+	confirmed := call(t, r, http.MethodPost, "/api/v1/consumer/activity-check-ins/"+entryCode+"/confirm", confirmBody, token, "checkin-confirm-0001")
+	if confirmed.Code != http.StatusOK || fmt.Sprint(confirmed.Data["status"]) != "VERIFIED" {
+		t.Fatalf("checkin confirm=%+v", confirmed)
+	}
+	replayedConfirm := call(t, r, http.MethodPost, "/api/v1/consumer/activity-check-ins/"+entryCode+"/confirm", confirmBody, token, "checkin-confirm-0001")
+	if replayedConfirm.Code != http.StatusOK || replayedConfirm.Header.Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("checkin replay=%+v", replayedConfirm)
+	}
+	conflictedConfirm := call(t, r, http.MethodPost, "/api/v1/consumer/activity-check-ins/"+entryCode+"/confirm", map[string]any{"activityBookingId": freeID}, token, "checkin-confirm-0001")
+	if conflictedConfirm.Code != http.StatusConflict {
+		t.Fatalf("checkin idempotency conflict=%+v", conflictedConfirm)
+	}
+	var record struct {
+		OperatorType string `gorm:"column:operator_type"`
+	}
+	must(t, db.Table("verification_record").Select("operator_type").Where("booking_id=?", freeID).Take(&record).Error)
+	if record.OperatorType != "CONSUMER_SELF_SCAN" {
+		t.Fatalf("operator type=%s", record.OperatorType)
 	}
 	paidBody := map[string]any{"activityId": fmt.Sprint(activity), "sessionId": fmt.Sprint(session), "ticketTypeId": fmt.Sprint(paid), "quantity": 1}
 	created := call(t, r, http.MethodPost, "/api/v1/consumer/activity-bookings", paidBody, token, "paid-create-00001")
@@ -119,7 +178,8 @@ func TestActivityBookingsHTTPWithMySQL(t *testing.T) {
 	must(t, db.Table("activity_session").Where("id=?", session).Update("end_at", time.Now().Add(-time.Minute)).Error)
 	n, e = activitybookings.NewService(db).ExpireEnded(t.Context())
 	must(t, e)
-	if n < 2 {
+	// The first free booking was already verified through the consumer scan.
+	if n < 1 {
 		t.Fatalf("ended bookings expired=%d", n)
 	}
 }

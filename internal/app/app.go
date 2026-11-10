@@ -15,12 +15,14 @@ import (
 	"xingyanshu-backend/internal/database"
 	"xingyanshu-backend/internal/modules/activities"
 	"xingyanshu-backend/internal/modules/activitybookings"
+	"xingyanshu-backend/internal/modules/aftersales"
 	"xingyanshu-backend/internal/modules/authorders"
 	"xingyanshu-backend/internal/modules/authorizations"
 	"xingyanshu-backend/internal/modules/avatar"
 	"xingyanshu-backend/internal/modules/creators"
 	"xingyanshu-backend/internal/modules/files"
 	"xingyanshu-backend/internal/modules/foundation"
+	"xingyanshu-backend/internal/modules/fulfillment"
 	"xingyanshu-backend/internal/modules/identity"
 	"xingyanshu-backend/internal/modules/ips"
 	"xingyanshu-backend/internal/modules/market"
@@ -35,6 +37,7 @@ import (
 	"xingyanshu-backend/internal/platform/evidence"
 	"xingyanshu-backend/internal/platform/filestore"
 	"xingyanshu-backend/internal/platform/httpx"
+	"xingyanshu-backend/internal/platform/logistics"
 	"xingyanshu-backend/internal/platform/logx"
 )
 
@@ -70,14 +73,24 @@ func RunServer(cfg config.Config, configPath string) error {
 	organizationService := identity.NewOrganizationService(db)
 	foundationService := foundation.NewService(db)
 	fileService := files.NewService(db, storage, filePolicy, cfg.File)
-	evidenceService := evidence.NewService(db, evidence.NewProvider(cfg.Evidence.Provider), cfg.Evidence.CallbackSecret)
+	evidenceProvider, err := evidence.NewProvider(cfg.Evidence)
+	if err != nil {
+		return fmt.Errorf("open evidence provider: %w", err)
+	}
+	evidenceService := evidence.NewService(db, evidenceProvider, cfg.Evidence.CallbackSecret)
 	planService := plans.NewService(db)
 	ipService := ips.NewService(db, contentmoderation.NewProvider(cfg.ContentSafety), cfg.Auth.JWTSecret, evidenceService, storage, cfg.File)
 	creatorService := creators.NewService(db, redisClient, cfg.Auth, cfg.App.Environment)
 	authOrderService := authorders.NewService(db)
 	paymentService := payments.NewService(db)
 	productOrderService := productorders.NewService(db)
-	activityBookingService := activitybookings.NewService(db)
+	logisticsProvider, err := logistics.NewProvider(cfg.Logistics)
+	if err != nil {
+		return err
+	}
+	fulfillmentService := fulfillment.NewService(db, logisticsProvider, cfg.Logistics)
+	activityBookingService := activitybookings.NewServiceWithConfig(db, cfg.Activity)
+	afterSaleService := aftersales.NewService(db, cfg.AfterSale, contentmoderation.NewProvider(cfg.ContentSafety))
 	authorizationService := authorizations.NewService(db, fileService)
 	workService := works.NewService(db, contentmoderation.NewProvider(cfg.ContentSafety), evidenceService)
 	productService := products.NewService(db, contentmoderation.NewProvider(cfg.ContentSafety), storage)
@@ -91,11 +104,16 @@ func RunServer(cfg config.Config, configPath string) error {
 	avatar.RegisterRoutes(apiGroup, avatarService, avatar.RequireAuthentication(db, cfg.Auth))
 	avatar.RegisterAdminRoutes(apiGroup, avatarService, identity.RequireAdminAuthentication(db, cfg.Auth))
 	productorders.RegisterRoutes(apiGroup, productOrderService, identity.RequireConsumerAuthentication(db, cfg.Auth), cfg.App.Environment)
+	fulfillment.RegisterConsumerRoutes(apiGroup, fulfillmentService, identity.RequireConsumerAuthentication(db, cfg.Auth))
 	activitybookings.RegisterRoutes(apiGroup, activityBookingService, identity.RequireConsumerAuthentication(db, cfg.Auth), cfg.App.Environment)
+	aftersales.RegisterRoutes(apiGroup, afterSaleService, identity.RequireConsumerAuthentication(db, cfg.Auth))
 	creators.RegisterRoutes(apiGroup, creatorService, loginService, fileService, creators.RequireAuthentication(db, cfg.Auth), identity.RequireAdminAuthentication(db, cfg.Auth))
 	foundation.RegisterPublicRoutes(apiGroup, foundationService)
+	foundation.RegisterCreatorRoutes(apiGroup, foundationService, creators.RequireAuthentication(db, cfg.Auth))
 	identity.RegisterProtectedRoutes(apiGroup, loginService, accountService, organizationService, identity.RequireAdminAuthentication(db, cfg.Auth))
 	foundation.RegisterProtectedRoutes(apiGroup, foundationService, identity.RequireAdminAuthentication(db, cfg.Auth))
+	fulfillment.RegisterAdminRoutes(apiGroup, fulfillmentService, identity.RequireAdminAuthentication(db, cfg.Auth))
+	aftersales.RegisterAdminRoutes(apiGroup, afterSaleService, identity.RequireAdminAuthentication(db, cfg.Auth))
 	files.RegisterProtectedRoutes(apiGroup, fileService, identity.RequireAdminAuthentication(db, cfg.Auth))
 	plans.RegisterRoutes(apiGroup, planService, identity.RequireAdminAuthentication(db, cfg.Auth))
 	ips.RegisterRoutes(apiGroup, ipService, identity.RequireAdminAuthentication(db, cfg.Auth))
@@ -106,8 +124,11 @@ func RunServer(cfg config.Config, configPath string) error {
 	works.RegisterRoutes(apiGroup, workService, creators.RequireAuthentication(db, cfg.Auth), identity.RequireAdminAuthentication(db, cfg.Auth))
 	products.RegisterRoutes(apiGroup, productService, creators.RequireAuthentication(db, cfg.Auth), identity.RequireAdminAuthentication(db, cfg.Auth))
 	activities.RegisterRoutes(apiGroup, activityService, creators.RequireAuthentication(db, cfg.Auth))
+	activitybookings.RegisterCreatorRoutes(apiGroup, activityBookingService, creators.RequireAuthentication(db, cfg.Auth))
+	activitybookings.RegisterPublicRoutes(apiGroup, activityBookingService)
 	publiccontent.RegisterRoutes(apiGroup, publiccontent.NewService(db, storage))
 	evidence.RegisterCallbackRoute(apiGroup, evidenceService)
+	evidence.RegisterCreatorRoutes(apiGroup, evidenceService, creators.RequireAuthentication(db, cfg.Auth))
 
 	log.Printf("server starting: environment=%s address=%s", cfg.App.Environment, cfg.App.Server.Address)
 	return router.Run(cfg.App.Server.Address)
@@ -180,10 +201,19 @@ func RunWorker(cfg config.Config) error {
 		return fmt.Errorf("open file storage: %w", err)
 	}
 	fileService := files.NewService(db, storage, config.NewFilePolicyProvider(cfg.File.Policy), cfg.File)
-	evidenceService := evidence.NewService(db, evidence.NewProvider(cfg.Evidence.Provider), cfg.Evidence.CallbackSecret)
+	evidenceProvider, err := evidence.NewProvider(cfg.Evidence)
+	if err != nil {
+		return fmt.Errorf("open evidence provider: %w", err)
+	}
+	evidenceService := evidence.NewService(db, evidenceProvider, cfg.Evidence.CallbackSecret)
 	service := authorders.NewService(db)
 	productOrderService := productorders.NewService(db)
-	activityBookingService := activitybookings.NewService(db)
+	logisticsProvider, err := logistics.NewProvider(cfg.Logistics)
+	if err != nil {
+		return fmt.Errorf("open logistics provider: %w", err)
+	}
+	fulfillmentService := fulfillment.NewService(db, logisticsProvider, cfg.Logistics)
+	activityBookingService := activitybookings.NewServiceWithConfig(db, cfg.Activity)
 	activityService := activities.NewService(db, contentmoderation.NewProvider(cfg.ContentSafety))
 	avatarStorage, err := openAvatarStorage(cfg, storage)
 	if err != nil {
@@ -191,8 +221,16 @@ func RunWorker(cfg config.Config) error {
 	}
 	avatarService := avatar.NewServiceWithConfig(db, nil, cfg.Auth, cfg.App.Environment, cfg.Avatar, avatarStorage)
 	contractProcessor := payments.NewContractProcessor(db, fileService, evidenceService)
-	interval := time.Minute
-	log.Printf("worker started: environment=%s interval=%s jobs=auth-order-timeout,product-order-timeout,activity-booking-timeout,activity-booking-expiry,contract-generation,evidence-retry,activity-end,avatar-quality,avatar-roster-identity,avatar-face-identity,avatar-export", cfg.App.Environment, interval)
+	interval := cfg.App.Worker.PollInterval
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	logisticsInterval := cfg.Logistics.PollInterval
+	if logisticsInterval <= 0 {
+		logisticsInterval = interval
+	}
+	var nextLogisticsPoll time.Time
+	log.Printf("worker started: environment=%s interval=%s logistics_interval=%s jobs=auth-order-timeout,product-order-timeout,logistics-poll,product-auto-confirm,activity-booking-timeout,activity-booking-expiry,contract-generation,evidence-retry,evidence-certificate,activity-end,avatar-quality,avatar-roster-identity,avatar-face-identity,avatar-export", cfg.App.Environment, interval, logisticsInterval)
 	for {
 		if count, err := service.CloseExpired(context.Background()); err != nil {
 			logx.Errorf("module=authorders action=close_expired stage=worker error_type=%T error=%q", err, logx.Redact(err.Error()))
@@ -205,6 +243,19 @@ func RunWorker(cfg config.Config) error {
 			log.Printf("close expired product orders failed: %v", err)
 		} else if count > 0 {
 			log.Printf("closed expired product orders: count=%d", count)
+		}
+		if nextLogisticsPoll.IsZero() || !time.Now().Before(nextLogisticsPoll) {
+			nextLogisticsPoll = time.Now().Add(logisticsInterval)
+			if count, err := fulfillmentService.RefreshDue(context.Background(), 20); err != nil {
+				logx.Errorf("module=fulfillment action=refresh_logistics stage=worker error_type=%T error=%q", err, logx.Redact(err.Error()))
+			} else if count > 0 {
+				log.Printf("refreshed logistics deliveries: count=%d", count)
+			}
+		}
+		if count, err := fulfillmentService.AutoCompleteDue(context.Background()); err != nil {
+			logx.Errorf("module=fulfillment action=auto_confirm stage=worker error_type=%T error=%q", err, logx.Redact(err.Error()))
+		} else if count > 0 {
+			log.Printf("auto confirmed signed product orders: count=%d", count)
 		}
 		if count, err := activityBookingService.CloseExpired(context.Background()); err != nil {
 			logx.Errorf("module=activitybookings action=close_expired stage=worker error_type=%T error=%q", err, logx.Redact(err.Error()))
@@ -229,6 +280,11 @@ func RunWorker(cfg config.Config) error {
 			log.Printf("retry authorization contract evidence failed: %v", err)
 		} else if count > 0 {
 			log.Printf("retried authorization contract evidence: count=%d", count)
+		}
+		if count, err := evidenceService.ProcessDueCertificates(context.Background(), 20); err != nil {
+			logx.Errorf("module=evidence action=process_certificates stage=worker error_type=%T error=%q", err, logx.Redact(err.Error()))
+		} else if count > 0 {
+			log.Printf("processed evidence certificates: count=%d", count)
 		}
 		if count, err := activityService.CloseEnded(context.Background()); err != nil {
 			logx.Errorf("module=activities action=close_ended stage=worker error_type=%T error=%q", err, logx.Redact(err.Error()))

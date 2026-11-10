@@ -1,0 +1,8 @@
+# 复制为 remote-debug.local.yaml 后按实际环境修改。
+# 禁止提交 password、token、私钥或连接字符串。
+remote_debug:
+  protocol: rdp
+  host: <rdp-host>
+  user: <rdp-user>
+  log_dir: <remote-log-dir>
+  executable_dir: <remote-executable-dir>

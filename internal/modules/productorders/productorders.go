@@ -94,6 +94,7 @@ type purchasableLine struct {
 	StockSold        int    `gorm:"column:stock_sold"`
 	FreightMode      string `gorm:"column:freight_mode"`
 	FreightAmount    string `gorm:"column:freight_amount"`
+	FulfillmentMode  string `gorm:"column:fulfillment_mode"`
 	RuleSnapshot     []byte `gorm:"column:rule_snapshot"`
 }
 
@@ -253,7 +254,7 @@ func (s *Service) loadLines(tx *gorm.DB, lines map[uint64]int) ([]purchasableLin
 		ids = append(ids, id)
 	}
 	var rows []purchasableLine
-	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("product_sku sk").Joins("JOIN product_version v ON v.id=sk.product_version_id AND v.status='PUBLISHED'").Joins("JOIN product p ON p.current_version_id=v.id AND p.status='PUBLISHED'").Where("sk.id IN ? AND sk.status='ACTIVE' AND sk.sku_status='ON_SALE'", ids).Select("p.id product_id,v.id product_version_id,sk.id sku_id,v.product_name,sk.sku_name,sk.sku_code,sk.sale_price,sk.stock_total,sk.stock_locked,sk.stock_sold,v.freight_mode,v.freight_amount,v.rule_snapshot").Find(&rows).Error
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("product_sku sk").Joins("JOIN product_version v ON v.id=sk.product_version_id AND v.status='PUBLISHED'").Joins("JOIN product p ON p.current_version_id=v.id AND p.status='PUBLISHED'").Where("sk.id IN ? AND sk.status='ACTIVE' AND sk.sku_status='ON_SALE'", ids).Select("p.id product_id,v.id product_version_id,sk.id sku_id,v.product_name,sk.sku_name,sk.sku_code,sk.sale_price,sk.stock_total,sk.stock_locked,sk.stock_sold,v.freight_mode,v.freight_amount,p.fulfillment_mode,v.rule_snapshot").Find(&rows).Error
 	if err != nil {
 		return nil, "", err
 	}
@@ -297,7 +298,7 @@ func calculate(rows []purchasableLine, quantities map[uint64]int) (int64, int64,
 		}
 		var rule any
 		_ = json.Unmarshal(r.RuleSnapshot, &rule)
-		items = append(items, map[string]any{"productId": fmt.Sprint(r.ProductID), "productVersionId": fmt.Sprint(r.ProductVersionID), "productName": r.ProductName, "skuId": fmt.Sprint(r.SKUId), "skuCode": r.SKUCode, "skuName": r.SKUName, "quantity": q, "unitPrice": money(p), "itemAmount": money(p * int64(q)), "freightMode": r.FreightMode, "freightAmount": money(f), "afterSaleRule": rule, "fulfillmentMode": "PLATFORM_SHIP"})
+		items = append(items, map[string]any{"productId": fmt.Sprint(r.ProductID), "productVersionId": fmt.Sprint(r.ProductVersionID), "productName": r.ProductName, "skuId": fmt.Sprint(r.SKUId), "skuCode": r.SKUCode, "skuName": r.SKUName, "quantity": q, "unitPrice": money(p), "itemAmount": money(p * int64(q)), "freightMode": r.FreightMode, "freightAmount": money(f), "afterSaleRule": rule, "fulfillmentMode": r.FulfillmentMode})
 	}
 	return subtotal, freight, items, nil
 }
@@ -539,16 +540,23 @@ func (s *Service) Get(ctx context.Context, current identity.CurrentConsumer, id 
 	}
 	return s.orderData(ctx, o), "", nil
 }
-func (s *Service) List(ctx context.Context, current identity.CurrentConsumer) ([]map[string]any, error) {
+
+// List returns a stable object envelope rather than a bare JSON array. Status is
+// an optional exact order-status filter for the H5 order tabs.
+func (s *Service) List(ctx context.Context, current identity.CurrentConsumer, status string) (map[string]any, error) {
 	var rows []orderRow
-	if e := s.db.WithContext(ctx).Table("product_order").Where("consumer_id=?", current.ConsumerID).Order("created_at DESC").Find(&rows).Error; e != nil {
+	query := s.db.WithContext(ctx).Table("product_order").Where("consumer_id=?", current.ConsumerID)
+	if status = strings.ToUpper(strings.TrimSpace(status)); status != "" {
+		query = query.Where("status=?", status)
+	}
+	if e := query.Order("created_at DESC").Find(&rows).Error; e != nil {
 		return nil, e
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, o := range rows {
 		out = append(out, s.orderData(ctx, o))
 	}
-	return out, nil
+	return map[string]any{"items": out, "total": len(out)}, nil
 }
 func (s *Service) orderData(ctx context.Context, o orderRow) map[string]any {
 	var items []map[string]any
